@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
@@ -9,9 +10,27 @@ import { pathToFileURL } from 'node:url'
 
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'))
 const { installedHealth } = await import(pathToFileURL(join(process.cwd(), 'scripts/release-apply.mjs')))
-const { updatePaths } = await import(pathToFileURL(join(process.cwd(), 'server/updates.ts')))
+const { checkedEnvelope, jsonFile, planUpdate, updatePaths } = await import(pathToFileURL(join(process.cwd(), 'server/updates.ts')))
 const paths = updatePaths()
 mkdirSync(paths.work, { recursive: true })
+const signed = await jsonFile(join(paths.work, 'bootstrap-catalog.json'))
+let catalog
+if (signed) {
+  catalog = (await checkedEnvelope(paths, signed)).catalog
+} else {
+  const versions = JSON.parse(readFileSync(new URL('../scripts/release-versions.json', import.meta.url)))
+  const { componentFiles } = await import(pathToFileURL(join(process.cwd(), 'core/updates.ts')))
+  const components = { app: { version } }
+  for (const id of ['phonon', 'whisper']) {
+    const files = componentFiles[id].map(name => {
+      const data = readFileSync(join(paths.speech, name))
+      return { name, bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') }
+    })
+    components[id] = { ...versions[id], files }
+  }
+  catalog = { components }
+}
+assert.deepEqual(await planUpdate(paths, catalog, true), [], 'Verified speech must already be current.')
 await installedHealth(paths, false)
 const reservation = createServer()
 reservation.listen(0, '127.0.0.1')

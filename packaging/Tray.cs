@@ -57,9 +57,18 @@ internal class Tray : ApplicationContext
                 try
                 {
                     if (shutdown || HelperActive()) return 0;
-                    CleanOldWorkers();
-                    if (File.Exists(Path.Combine(Updates, "recovery.json"))) { LaunchUpdater(); return 0; }
-                    using (var tray = new Tray(open, quit)) Application.Run(tray);
+                    Directory.CreateDirectory(Platform);
+                    using (var gate = File.Open(Path.Combine(Platform, "program.lock"), FileMode.OpenOrCreate,
+                        FileAccess.ReadWrite, FileShare.Read))
+                    {
+                        CleanOldWorkers();
+                        if (File.Exists(Path.Combine(Updates, "recovery.json")) || File.Exists(Path.Combine(Updates, "pending.json")))
+                        {
+                            LaunchUpdater();
+                            return 0;
+                        }
+                        using (var tray = new Tray(open, quit)) Application.Run(tray);
+                    }
                 }
                 finally { mutex.ReleaseMutex(); }
             }
@@ -191,19 +200,25 @@ internal class Tray : ApplicationContext
         if (!File.Exists(marker)) return false;
         try
         {
+            if (new FileInfo(marker).Length > 2048) return false;
             var info = new System.Web.Script.Serialization.JavaScriptSerializer()
                 .Deserialize<System.Collections.Generic.Dictionary<string, string>>(File.ReadAllText(marker));
-            int pid = Int32.Parse(info["pid"]);
+            string id, ticks;
+            int pid;
+            if (info == null || !info.TryGetValue("pid", out id) || !info.TryGetValue("ticks", out ticks) ||
+                !Int32.TryParse(id, out pid) || pid <= 0) return false;
             using (var p = Process.GetProcessById(pid))
             {
                 string exe = p.MainModule.FileName;
-                return p.StartTime.ToUniversalTime().Ticks.ToString() == info["ticks"] &&
+                return p.StartTime.ToUniversalTime().Ticks.ToString() == ticks &&
                     exe.StartsWith(Updates + "\\worker-", StringComparison.OrdinalIgnoreCase) &&
                     Path.GetFileName(exe).Equals("node.exe", StringComparison.OrdinalIgnoreCase);
             }
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }
+        catch (FileNotFoundException) { return false; }
+        catch (System.ComponentModel.Win32Exception) { return false; }
     }
 
     private static void LaunchUpdater()
@@ -223,7 +238,14 @@ internal class Tray : ApplicationContext
         using (var p = Process.Start(start))
         {
             string marker = Path.Combine(Updates, "native-helper.json");
-            File.WriteAllText(marker, "{\"pid\":\"" + p.Id + "\",\"ticks\":\"" + p.StartTime.ToUniversalTime().Ticks + "\"}");
+            string temp = Path.Combine(Updates, Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                File.WriteAllText(temp, "{\"pid\":\"" + p.Id + "\",\"ticks\":\"" + p.StartTime.ToUniversalTime().Ticks + "\"}");
+                if (File.Exists(marker)) File.Replace(temp, marker, null);
+                else File.Move(temp, marker);
+            }
+            finally { if (File.Exists(temp)) File.Delete(temp); }
         }
     }
 

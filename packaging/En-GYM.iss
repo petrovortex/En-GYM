@@ -26,6 +26,7 @@ OutputDir={#OutputFolder}
 OutputBaseFilename=En-GYM-Setup
 CloseApplications=yes
 RestartApplications=no
+SetupMutex=Local\En-GYM-Setup-732FA5F0
 Uninstallable=not FixtureInstall
 CreateUninstallRegKey=not FixtureInstall
 
@@ -47,6 +48,7 @@ Filename: "{app}\En-GYM.exe"; Description: "Open En-GYM"; Flags: postinstall now
 [Code]
 var
   Progress: TOutputProgressWizardPage;
+  ProgramLock: Integer;
 
 function HasFlag(const Flag: String): Boolean;
 var I: Integer;
@@ -74,6 +76,24 @@ end;
 
 function SetEnvironmentVariable(const Name, Value: String): Boolean;
 external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+function OpenProgramLock(const Name: String; Access, Share: Cardinal; Security: Integer;
+  Disposition, Flags: Cardinal; Template: Integer): Integer;
+external 'CreateFileW@kernel32.dll stdcall';
+function CloseProgramLock(Handle: Integer): Boolean;
+external 'CloseHandle@kernel32.dll stdcall';
+procedure ReleaseLock;
+begin
+  if (ProgramLock <> 0) and (ProgramLock <> -1) then CloseProgramLock(ProgramLock);
+  ProgramLock := 0;
+end;
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then ReleaseLock;
+end;
+procedure DeinitializeSetup;
+begin
+  ReleaseLock;
+end;
 
 procedure OutputLine(const S: String; const Error, FirstLine: Boolean);
 var Slash, Space, N, D: Integer; Tail: String;
@@ -101,6 +121,18 @@ begin
   Base := ExpandConstant('{localappdata}');
   if FixtureInstall then Base := ExpandConstant('{app}\sandbox-profile');
   Speech := Base + '\En-GYM\components\speech';
+  ReleaseLock;
+  if not ForceDirectories(Base + '\En-GYM') then begin
+    Result := 'Setup could not open your local En-GYM folder.'; Exit;
+  end;
+  ProgramLock := OpenProgramLock(Base + '\En-GYM\program.lock', $C0000000, 0, 0, 4, 128, 0);
+  if ProgramLock = -1 then begin
+    Result := 'Choose Quit from the En-GYM tray menu, then retry setup.'; Exit;
+  end;
+  if FileExists(Base + '\En-GYM\updates\recovery.json') or FileExists(Base + '\En-GYM\updates\pending.json') then begin
+    Result := 'Open En-GYM to finish the pending update. Then choose Quit from the tray menu and retry setup.';
+    ReleaseLock; Exit;
+  end;
   Progress.Show;
   try
     try
@@ -128,5 +160,6 @@ begin
     end;
   finally
     Progress.Hide;
+    if Result <> '' then ReleaseLock;
   end;
 end;

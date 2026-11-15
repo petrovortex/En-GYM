@@ -1,16 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { DatabaseSync, backup } from 'node:sqlite'
-import {
-  copyFile,
-  cp,
-  lstat,
-  mkdir,
-  mkdtemp,
-  rename,
-  rm,
-  writeFile,
-} from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { componentFiles } from '../core/updates.ts'
@@ -26,6 +17,7 @@ import {
   selectChanges,
   stageFile,
   updatePaths,
+  withUpdateLock,
 } from '../server/updates.ts'
 
 const run = promisify(execFile)
@@ -64,32 +56,6 @@ async function copyOwned(from, to) {
     },
   })
 }
-async function withApplyLock(work, action) {
-  await assertLocalPath(work)
-  await mkdir(work, { recursive: true })
-  const lock = join(work, 'apply.lock')
-  try {
-    await writeFile(lock, JSON.stringify(process.pid), { flag: 'wx' })
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err
-    const pid = await jsonFile(lock)
-    if (!Number.isSafeInteger(pid) || pid <= 0)
-      throw Error('An update lock could not be verified.')
-    try {
-      process.kill(pid, 0)
-      throw Error('An update is currently running.')
-    } catch (e) {
-      if (e.code !== 'ESRCH') throw e
-    }
-    await rm(lock)
-    await writeFile(lock, JSON.stringify(process.pid), { flag: 'wx' })
-  }
-  try {
-    return await action()
-  } finally {
-    await rm(lock, { force: true })
-  }
-}
 // All snapshot and restoration destinations come from local allowlists. No paths in a
 // downloaded catalog or journal are used as executable names or arbitrary destinations.
 function protectedFiles(paths, appChanged, speechNames) {
@@ -100,166 +66,179 @@ function protectedFiles(paths, appChanged, speechNames) {
   ]
 }
 export async function applyPrepared(paths, options = {}) {
-  return withApplyLock(paths.work, async () => {
-    const recovery = join(paths.work, 'recovery.json'),
-      pendingPath = join(paths.work, 'pending.json')
-    const snapshot = join(paths.work, 'recovery'),
-      staging = join(paths.work, 'staging')
-    const dbPath = join(
-      options.profile ?? join(process.env.LOCALAPPDATA, 'En-GYM', 'user'),
-      'practice.sqlite',
-    )
-    const allSpeech = [...componentFiles.phonon, ...componentFiles.whisper]
-    const clean = async () => {
-      // Remove the recovery marker only once program, speech and DB are consistent.
-      await rm(recovery, { force: true })
-      await rm(pendingPath, { force: true })
-      await rm(snapshot, { recursive: true, force: true })
-      await rm(staging, { recursive: true, force: true })
-    }
-    const restore = async (journal) => {
-      if (
-        journal?.schema !== 1 ||
-        typeof journal.appChanged !== 'boolean' ||
-        !Array.isArray(journal.speech) ||
-        journal.speech.some((n) => !allSpeech.includes(n))
-      )
-        throw Error('The update recovery record is invalid.')
-      const saved = await jsonFile(join(snapshot, 'snapshot.json'))
-      if (
-        !saved ||
-        JSON.stringify(saved.journal) !== JSON.stringify(journal) ||
-        !Array.isArray(saved.entries) ||
-        typeof saved.database !== 'boolean'
-      )
-        throw Error(
-          'The update snapshot is incomplete. Existing files have been preserved.',
-        )
-      for (const [target, name] of protectedFiles(
-        paths,
-        journal.appChanged,
-        journal.speech,
-      )) {
-        if (saved.entries.includes(name) && !(await exists(join(snapshot, name))))
-          throw Error('The update snapshot is incomplete.')
-        await assertLocalPath(target)
-      }
-      if (saved.database && !(await exists(join(snapshot, 'practice.sqlite'))))
-        throw Error('The database backup is missing.')
-      for (const [target, name] of protectedFiles(
-        paths,
-        journal.appChanged,
-        journal.speech,
-      )) {
-        await assertLocalPath(target)
-        await rm(target, { recursive: true, force: true })
-        if (await exists(join(snapshot, name)))
-          await copyOwned(join(snapshot, name), target)
-      }
-      if (journal.appChanged) {
-        await assertLocalPath(dbPath)
-        for (const ext of ['-wal', '-shm', '-journal'])
-          await rm(dbPath + ext, { force: true })
-        if (await exists(join(snapshot, 'practice.sqlite')))
-          await copyOwned(join(snapshot, 'practice.sqlite'), dbPath)
-        else await rm(dbPath, { force: true })
-      }
-      await clean()
-    }
-    const previous = await jsonFile(recovery)
-    if (previous) {
-      await restore(previous)
-      return 'recovered'
-    }
-    const pending = await jsonFile(pendingPath)
-    if (!pending) throw Error('No verified update is ready.')
-    const { catalog } = await checkedEnvelope(paths, pending.envelope)
-    const available = await planUpdate(paths, catalog, pending.speechOnly)
-    const changes = await selectChanges(paths, catalog, available, pending.selected)
-    const appChanged = changes.some((c) => c.component === 'app')
-    const replacements = []
-    for (const { component } of changes)
-      for (const file of catalog.components[component].files) {
-        if (component !== 'app' && (await matches(join(paths.speech, file.name), file)))
-          continue
-        if (!(await matches(stageFile(paths, file), file)))
-          throw Error('The staged update was modified. Download it again.')
-        replacements.push({ component, file })
-      }
-    const journal = {
-      schema: 1,
-      appChanged,
-      speech: replacements.filter((x) => x.component !== 'app').map((x) => x.file.name),
-    }
-    await assertLocalPath(snapshot)
-    await rm(snapshot, { recursive: true, force: true })
-    await mkdir(snapshot, { recursive: true })
-    const saved = { journal, entries: [], database: appChanged && (await exists(dbPath)) }
-    for (const [target, name] of protectedFiles(paths, appChanged, journal.speech)) {
-      if (await exists(target)) {
-        await copyOwned(target, join(snapshot, name))
-        saved.entries.push(name)
-      }
-    }
-    if (saved.database) {
-      await assertLocalPath(dbPath)
-      const db = new DatabaseSync(dbPath, { readOnly: true })
-      try {
-        await backup(db, join(snapshot, 'practice.sqlite'))
-      } finally {
-        db.close()
-      }
-    }
-    await atomicJson(join(snapshot, 'snapshot.json'), saved)
-    await atomicJson(recovery, journal)
+  return withUpdateLock(paths.work, async () => {
     try {
-      for (const { component, file } of replacements) {
-        const staged = stageFile(paths, file)
-        if (component === 'app') {
-          // Keep .exe extension for Win32 installer discovery, then verify that exact executable.
-          const installer = join(staging, 'En-GYM-Setup.exe')
-          await copyFile(staged, installer)
-          if (!(await matches(installer, file))) throw Error('The installer is damaged.')
-          await (
-            options.install ??
-            ((p) =>
-              run(
-                p,
-                [
-                  '/CURRENTUSER',
-                  '/UPDATE',
-                  '/NOAUTOOPEN',
-                  '/VERYSILENT',
-                  '/SUPPRESSMSGBOXES',
-                  '/NORESTART',
-                ],
-                { windowsHide: true, cwd: staging, timeout: 300000 },
-              ))
-          )(installer)
-          if ((await installedApp(paths)) !== catalog.components.app.version)
-            throw Error('The new app version did not install.')
-        } else {
-          const target = join(paths.speech, file.name)
-          await assertLocalPath(target)
-          await mkdir(dirname(target), { recursive: true })
-          await rename(staged, target)
-          if (!(await matches(target, file)))
-            throw Error('An updated speech file did not pass verification.')
-        }
-      }
-      if (changes.length && options.health) await options.health(appChanged)
-      const receipts = (await jsonFile(join(paths.work, 'installed.json'))) ?? {}
-      for (const { component, version } of changes)
-        if (component !== 'app')
-          receipts[component] = { version, digest: releaseDigest(catalog, component) }
-      await atomicJson(join(paths.work, 'installed.json'), receipts)
+      return await applyPreparedLocked(paths, options)
     } catch (err) {
-      await restore(journal)
+      if (
+        options.retireFailedPending &&
+        !(await exists(join(paths.work, 'recovery.json')))
+      ) {
+        await rm(join(paths.work, 'pending.json'), { force: true })
+      }
       throw err
     }
-    await clean()
-    return 'installed'
   })
+}
+export async function applyPreparedLocked(paths, options = {}) {
+  const recovery = join(paths.work, 'recovery.json'),
+    pendingPath = join(paths.work, 'pending.json')
+  const snapshot = join(paths.work, 'recovery'),
+    staging = join(paths.work, 'staging')
+  const dbPath = join(
+    options.profile ?? join(process.env.LOCALAPPDATA, 'En-GYM', 'user'),
+    'practice.sqlite',
+  )
+  const allSpeech = [...componentFiles.phonon, ...componentFiles.whisper]
+  const clean = async () => {
+    // Remove the recovery marker only once program, speech and DB are consistent.
+    await rm(recovery, { force: true })
+    await rm(pendingPath, { force: true })
+    await rm(snapshot, { recursive: true, force: true })
+    await rm(staging, { recursive: true, force: true })
+  }
+  const restore = async (journal) => {
+    if (
+      journal?.schema !== 1 ||
+      typeof journal.appChanged !== 'boolean' ||
+      !Array.isArray(journal.speech) ||
+      journal.speech.some((n) => !allSpeech.includes(n))
+    )
+      throw Error('The update recovery record is invalid.')
+    const saved = await jsonFile(join(snapshot, 'snapshot.json'))
+    if (
+      !saved ||
+      JSON.stringify(saved.journal) !== JSON.stringify(journal) ||
+      !Array.isArray(saved.entries) ||
+      typeof saved.database !== 'boolean'
+    )
+      throw Error(
+        'The update snapshot is incomplete. Existing files have been preserved.',
+      )
+    for (const [target, name] of protectedFiles(
+      paths,
+      journal.appChanged,
+      journal.speech,
+    )) {
+      if (saved.entries.includes(name) && !(await exists(join(snapshot, name))))
+        throw Error('The update snapshot is incomplete.')
+      await assertLocalPath(target)
+    }
+    if (saved.database && !(await exists(join(snapshot, 'practice.sqlite'))))
+      throw Error('The database backup is missing.')
+    for (const [target, name] of protectedFiles(
+      paths,
+      journal.appChanged,
+      journal.speech,
+    )) {
+      await assertLocalPath(target)
+      await rm(target, { recursive: true, force: true })
+      if (await exists(join(snapshot, name)))
+        await copyOwned(join(snapshot, name), target)
+    }
+    if (journal.appChanged) {
+      await assertLocalPath(dbPath)
+      for (const ext of ['-wal', '-shm', '-journal'])
+        await rm(dbPath + ext, { force: true })
+      if (await exists(join(snapshot, 'practice.sqlite')))
+        await copyOwned(join(snapshot, 'practice.sqlite'), dbPath)
+      else await rm(dbPath, { force: true })
+    }
+    await clean()
+  }
+  const previous = await jsonFile(recovery)
+  if (previous) {
+    await restore(previous)
+    return 'recovered'
+  }
+  const pending = await jsonFile(pendingPath)
+  if (!pending) throw Error('No verified update is ready.')
+  const { catalog } = await checkedEnvelope(paths, pending.envelope)
+  const available = await planUpdate(paths, catalog, pending.speechOnly)
+  const changes = await selectChanges(paths, catalog, available, pending.selected)
+  const appChanged = changes.some((c) => c.component === 'app')
+  const replacements = []
+  for (const { component } of changes)
+    for (const file of catalog.components[component].files) {
+      if (component !== 'app' && (await matches(join(paths.speech, file.name), file)))
+        continue
+      if (!(await matches(stageFile(paths, file), file)))
+        throw Error('The staged update was modified. Download it again.')
+      replacements.push({ component, file })
+    }
+  const journal = {
+    schema: 1,
+    appChanged,
+    speech: replacements.filter((x) => x.component !== 'app').map((x) => x.file.name),
+  }
+  await assertLocalPath(snapshot)
+  await rm(snapshot, { recursive: true, force: true })
+  await mkdir(snapshot, { recursive: true })
+  const saved = { journal, entries: [], database: appChanged && (await exists(dbPath)) }
+  for (const [target, name] of protectedFiles(paths, appChanged, journal.speech)) {
+    if (await exists(target)) {
+      await copyOwned(target, join(snapshot, name))
+      saved.entries.push(name)
+    }
+  }
+  if (saved.database) {
+    await assertLocalPath(dbPath)
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      await backup(db, join(snapshot, 'practice.sqlite'))
+    } finally {
+      db.close()
+    }
+  }
+  await atomicJson(join(snapshot, 'snapshot.json'), saved)
+  await atomicJson(recovery, journal)
+  try {
+    for (const { component, file } of replacements) {
+      const staged = stageFile(paths, file)
+      if (component === 'app') {
+        // Keep .exe extension for Win32 installer discovery, then verify that exact executable.
+        const installer = join(staging, 'En-GYM-Setup.exe')
+        await copyFile(staged, installer)
+        if (!(await matches(installer, file))) throw Error('The installer is damaged.')
+        await (
+          options.install ??
+          ((p) =>
+            run(
+              p,
+              [
+                '/CURRENTUSER',
+                '/UPDATE',
+                '/NOAUTOOPEN',
+                '/VERYSILENT',
+                '/SUPPRESSMSGBOXES',
+                '/NORESTART',
+              ],
+              { windowsHide: true, cwd: staging, timeout: 300000 },
+            ))
+        )(installer)
+        if ((await installedApp(paths)) !== catalog.components.app.version)
+          throw Error('The new app version did not install.')
+      } else {
+        const target = join(paths.speech, file.name)
+        await assertLocalPath(target)
+        await mkdir(dirname(target), { recursive: true })
+        await rename(staged, target)
+        if (!(await matches(target, file)))
+          throw Error('An updated speech file did not pass verification.')
+      }
+    }
+    if (changes.length && options.health) await options.health(appChanged)
+    const receipts = (await jsonFile(join(paths.work, 'installed.json'))) ?? {}
+    for (const { component, version } of changes)
+      if (component !== 'app')
+        receipts[component] = { version, digest: releaseDigest(catalog, component) }
+    await atomicJson(join(paths.work, 'installed.json'), receipts)
+  } catch (err) {
+    await restore(journal)
+    throw err
+  }
+  await clean()
+  return 'installed'
 }
 export async function installedHealth(paths, appChanged) {
   const node = join(paths.app, 'runtime', 'node.exe')
@@ -299,7 +278,15 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   const paths = updatePaths()
   let failed = false
   try {
-    await applyPrepared(paths, { health: (changed) => installedHealth(paths, changed) })
+    const result = await applyPrepared(paths, {
+      retireFailedPending: true,
+      health: (changed) => installedHealth(paths, changed),
+    })
+    if (result === 'recovered')
+      await atomicJson(join(paths.work, 'outcome.json'), {
+        message: 'The previous version was restored after an interrupted update.',
+      })
+    else await rm(join(paths.work, 'outcome.json'), { force: true })
   } catch (err) {
     failed = true
     await atomicJson(join(paths.work, 'outcome.json'), {
@@ -309,10 +296,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   }
   // A surviving journal means restoration itself needs attention. Never open a mixed install.
   await rm(join(paths.work, 'native-helper.json'), { force: true })
-  if (
-    !(await exists(join(paths.work, 'recovery.json'))) &&
-    !(await exists(join(paths.work, 'apply.lock')))
-  )
+  if (!(await exists(join(paths.work, 'recovery.json'))))
     spawn(join(paths.app, 'En-GYM.exe'), [], {
       cwd: paths.app,
       detached: true,

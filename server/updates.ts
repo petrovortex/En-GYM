@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { createReadStream } from 'node:fs'
 import {
   lstat,
@@ -74,6 +75,34 @@ export async function atomicJson(path: string, value: unknown) {
     await rename(temp, path)
   } finally {
     await rm(temp, { force: true })
+  }
+}
+// SQLite owns the inter-process lock. Windows releases it immediately on process
+// death, so recovery never has to guess whether a stale PID was reused.
+export async function withUpdateLock<T>(work: string, action: () => Promise<T>) {
+  const path = join(work, 'activation.sqlite')
+  await assertLocalPath(path)
+  await mkdir(work, { recursive: true })
+  const mutex = new DatabaseSync(path)
+  try {
+    try {
+      mutex.exec('BEGIN IMMEDIATE')
+    } catch (e) {
+      if ((e as { errcode?: number }).errcode === 5)
+        throw Error('Another update is already in progress.')
+      throw e
+    }
+    return await action()
+  } finally {
+    mutex.close()
+  }
+}
+export async function requireClearActivation(paths: UpdatePaths) {
+  for (const name of ['pending.json', 'recovery.json']) {
+    if ((await jsonFile(join(paths.work, name))) !== undefined)
+      throw Error(
+        'Restart the installed app to finish its pending update before running setup.',
+      )
   }
 }
 export async function matches(path: string, file: ReleaseFile) {
@@ -393,8 +422,12 @@ export async function checkUpdates() {
   status = { ...status, state: 'checking', changes: [], message: '', done: 0, total: 0 }
   try {
     const paths = updatePaths()
-    const candidate = await fetchCatalog(paths)
-    status.changes = await planUpdate(paths, candidate.catalog)
+    const candidate = await withUpdateLock(paths.work, async () => {
+      await requireClearActivation(paths)
+      const candidate = await fetchCatalog(paths)
+      status.changes = await planUpdate(paths, candidate.catalog)
+      return candidate
+    })
     await rm(join(paths.work, 'outcome.json'), { force: true })
     known = candidate
     status.total = status.changes.reduce((n, c) => n + c.bytes, 0)
@@ -411,8 +444,9 @@ export async function installUpdates(safeToRestart: () => boolean, components?: 
   if (!safeToRestart())
     throw Error('Finish your current practice or AI request before updating.')
   status = { ...status, state: 'downloading', message: '', done: 0 }
-  void (async () => {
-    const paths = updatePaths()
+  const paths = updatePaths()
+  void withUpdateLock(paths.work, async () => {
+    await requireClearActivation(paths)
     await checkedEnvelope(paths, candidate.envelope)
     const changes = await selectChanges(
       paths,
@@ -438,7 +472,7 @@ export async function installUpdates(safeToRestart: () => boolean, components?: 
     }
     status.state = 'restarting'
     setTimeout(() => process.exit(75), 350)
-  })().catch((e) => {
+  }).catch((e) => {
     status.state = 'error'
     status.message = friendly(e)
   })

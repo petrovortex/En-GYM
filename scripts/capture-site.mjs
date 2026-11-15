@@ -1,14 +1,20 @@
 // Capture the real interface using a disposable database containing sample practice.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, copyFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { setTimeout as wait } from 'node:timers/promises'
+import { mkdirSync, mkdtempSync, copyFileSync, writeFileSync, rmSync, realpathSync, readdirSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import { chromium } from 'playwright-core'
 
 const stamp = Date.UTC(2026, 10, 1, 10)
 const clip = '10000000-0000-4000-8000-000000000001'
+const qa = resolve('.work/qa')
 if (process.argv.includes('--seed')) {
+  const data = process.env.FIELDWORK_DATA
+  assert.ok(data && process.env.EN_GYM_INSTALLED !== '1', 'Start the screenshot script without --seed.')
+  const actual = realpathSync(data)
+  assert.ok(dirname(actual) === realpathSync(qa) && /^site-[\w-]+$/.test(basename(actual)) &&
+    readdirSync(actual).length === 0, 'Screenshot fixtures require a new, empty QA directory.')
   const { save, putVocabularyWord, clips } = await import('../server/store.ts')
   const { wave } = await import('../server/speech.ts')
   const items = ['The campus library', 'Weekend study groups', 'Choosing an elective', 'A new volunteer role'].map((title, i) => ({
@@ -30,24 +36,25 @@ if (process.argv.includes('--seed')) {
     ['deadline', 'We have a deadline for submitting the proposal.'],
   ]) putVocabularyWord(crypto.randomUUID(), term, { item: items[0].id, attempt: a.id, title: items[0].title, context, saved: stamp })
 } else {
-  const qa = resolve('.work/qa')
   mkdirSync(qa, { recursive: true })
   const data = mkdtempSync(join(qa, 'site-'))
-  const env = { ...process.env, FIELDWORK_DATA: data, FIELDWORK_PORT: '43395' }
+  const env = { ...process.env, EN_GYM_INSTALLED: '0', FIELDWORK_DATA: data, FIELDWORK_PORT: '43395' }
   const origin = 'http://127.0.0.1:' + env.FIELDWORK_PORT
   const assets = resolve('site/assets')
-  mkdirSync(assets, { recursive: true })
-  copyFileSync('public/en-gym.svg', join(assets, 'en-gym.svg'))
-  execFileSync(process.execPath, [process.argv[1], '--seed'], { env, windowsHide: true })
-  const server = spawn(process.execPath, ['server/main.ts'], { env, windowsHide: true, stdio: 'inherit' })
-  let browser
+  let browser, server
   try {
+    execFileSync(process.execPath, [process.argv[1], '--seed'], { env, windowsHide: true })
+    server = spawn(process.execPath, ['server/main.ts'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'inherit'] })
+    const output = createInterface({ input: server.stdout })
     let ready = false
-    for (let i = 0; i < 100 && !ready && server.exitCode === null; i++) {
-      ready = await fetch(origin + '/api/status').then((r) => r.ok, () => false)
-      if (!ready) await wait(100)
-    }
-    assert.ok(ready && server.exitCode === null)
+    try {
+      for await (const line of output) {
+        if (line === 'En-GYM is ready at ' + origin) { ready = true; break }
+      }
+      assert.ok(ready, 'The screenshot server could not start.')
+    } finally { output.close() }
+    mkdirSync(assets, { recursive: true })
+    copyFileSync('public/en-gym.svg', join(assets, 'en-gym.svg'))
     browser = await chromium.launch({ executablePath: process.env.FIELDWORK_CHROME ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe' })
     const page = await browser.newPage({ viewport: { width: 1160, height: 850 }, deviceScaleFactor: 1.5 })
     await page.goto(origin)
@@ -76,7 +83,8 @@ if (process.argv.includes('--seed')) {
     await page.locator('.wordCollection').screenshot({ path: join(assets, 'words.png') })
   } finally {
     await browser?.close()
-    if (server.exitCode === null) await new Promise((ok) => { server.once('exit', ok); server.kill() })
+    if (server && server.exitCode === null && server.signalCode === null)
+      await new Promise((ok) => { server.once('exit', ok); server.kill() })
     assert.equal(resolve(data, '..'), qa)
     rmSync(data, { recursive: true, maxRetries: 5, retryDelay: 200 })
   }

@@ -42,6 +42,10 @@ if (!$CompilerPath) {
 if (!(Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {
   throw 'Install Inno Setup 6.7.4 or pass its ISCC.exe path with -CompilerPath.'
 }
+$originalEnv = @{}
+foreach ($key in @('LOCALAPPDATA','FIELDWORK_SPEECH','FIELDWORK_INSTALL_ROOT','EN_GYM_INSTALLED')) {
+  $originalEnv[$key] = [Environment]::GetEnvironmentVariable($key)
+}
 Push-Location -LiteralPath $root
 try {
   if (!$SkipBuild) {
@@ -76,7 +80,7 @@ try {
     Copy-Item -LiteralPath 'node_modules/jose','node_modules/phonon-tts' -Destination $modules.FullName -Recurse
     New-Item -ItemType Directory -Path (Join-Path $bootstrap 'packaging'),(Join-Path $bootstrap 'core'),(Join-Path $bootstrap 'server') | Out-Null
     Copy-Item -LiteralPath 'packaging/speech-baseline.json','packaging/verify-vc.ps1','packaging/prepare-speech.mjs' -Destination (Join-Path $bootstrap 'packaging')
-    Copy-Item -LiteralPath 'scripts/phonon-assets.json' -Destination (Join-Path $bootstrap 'scripts')
+    Copy-Item -LiteralPath 'scripts/phonon-assets.json','scripts/release-versions.json' -Destination (Join-Path $bootstrap 'scripts')
     Copy-Item -LiteralPath 'core/updates.ts' -Destination (Join-Path $bootstrap 'core')
     Copy-Item -LiteralPath 'server/updates.ts' -Destination (Join-Path $bootstrap 'server')
 
@@ -97,13 +101,11 @@ try {
       $env:FIELDWORK_SPEECH = Join-Path $profile 'En-GYM/components/speech'
       $env:FIELDWORK_INSTALL_ROOT = $bootstrap
       $env:EN_GYM_INSTALLED = '1'
-      New-Item -ItemType Directory -Path $env:FIELDWORK_SPEECH -Force | Out-Null
-      # Build check uses a separate private profile with the exact baseline files.
-      foreach ($entry in @('asr','phonon-31m-en','ggml-base.en-q5_1.bin')) {
-        Copy-Item -LiteralPath (Join-Path $work "speech/$entry") -Destination $env:FIELDWORK_SPEECH -Recurse
-      }
+      # Start from empty storage. A second bootstrap verifies the repair path.
       & $NodePath (Join-Path $bootstrap 'packaging/prepare-speech.mjs')
       if ($LASTEXITCODE) { throw 'Staged speech integrity check failed.' }
+      & $NodePath (Join-Path $bootstrap 'packaging/prepare-speech.mjs')
+      if ($LASTEXITCODE) { throw 'Speech repair with existing receipts failed.' }
       $env:FIELDWORK_INSTALL_ROOT = $payload
       Push-Location -LiteralPath $payload
       try {
@@ -120,4 +122,7 @@ try {
     else { [IO.File]::Move($setup,$final) }
   }
   Get-Item -LiteralPath (Join-Path $output 'En-GYM-Setup.exe') | Select-Object FullName,Length
-} finally { Pop-Location }
+} finally {
+  foreach ($key in $originalEnv.Keys) { [Environment]::SetEnvironmentVariable($key,$originalEnv[$key]) }
+  Pop-Location
+}

@@ -29,14 +29,15 @@ const read = async (path) => JSON.parse(await readFile(path, 'utf8'))
 const previousRelease = await read('.work/previous/metadata.json').catch((e) => {
   if (e.code !== 'ENOENT') throw e
 })
-const previous =
+const verifiedPrevious =
   previousRelease &&
   verifyCatalog(
     await read('.work/previous/catalog.json'),
     root,
     undefined,
     Date.parse(previousRelease.published_at),
-  ).catalog
+  )
+const previous = verifiedPrevious?.catalog
 if (kind === 'speech' && !previous) throw Error('Publish an application release first.')
 const version = (await read('package.json')).version
 if (
@@ -114,12 +115,12 @@ const envelope = {
   catalog: signBytes(
     {
       schema: 1,
-      sequence: Date.now(),
+      sequence: Math.max(Date.now(), (verifiedPrevious?.watermark.sequence ?? 0) + 1),
       expires: Math.min(auth.expires, Date.now() + 90 * 86400000),
       components,
     },
     privateKey,
   ),
 }
-verifyCatalog(envelope, root)
+verifyCatalog(envelope, root, verifiedPrevious?.watermark)
 await writeFile(join(output, 'catalog.json'), JSON.stringify(envelope))

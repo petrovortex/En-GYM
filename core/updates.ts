@@ -102,6 +102,7 @@ function signedJson<T>(signed: SignedBytes, pem: string): T {
     throw Error('Update signature could not be verified.')
   return JSON.parse(data.toString('utf8'))
 }
+export class CatalogExpired extends Error {}
 export function verifyCatalog(
   env: Envelope,
   root: string,
@@ -119,19 +120,19 @@ export function verifyCatalog(
     !Number.isSafeInteger(authority.generation) ||
     authority.generation < 1 ||
     !Number.isSafeInteger(authority.expires) ||
-    authority.expires <= now
+    authority.expires < 1
   )
-    throw Error('The update signing authorization expired or is invalid.')
+    throw Error('The update signing authorization is invalid.')
   const catalog = signedJson<Catalog>(env.catalog, authority.key)
   if (
     catalog.schema !== 1 ||
     !Number.isSafeInteger(catalog.sequence) ||
     catalog.sequence <= 0 ||
     !Number.isSafeInteger(catalog.expires) ||
-    catalog.expires <= now ||
+    catalog.expires < 1 ||
     catalog.expires > authority.expires
   )
-    throw Error('The update catalog expired or is invalid. Check the clock and retry.')
+    throw Error('The update catalog is invalid.')
   const digest = createHash('sha256').update(env.catalog.payload).digest('hex')
   if (
     previous &&
@@ -180,6 +181,12 @@ export function verifyCatalog(
     })
   )
     throw Error('Invalid speech compatibility requirements.')
+  // Report expiry separately only once every signature, path, size, version and
+  // replay constraint passed. A virgin installer may then use its own pinned baseline.
+  if (catalog.expires <= now || authority.expires <= now)
+    throw new CatalogExpired(
+      'The signed update catalog expired. Check the clock and retry later.',
+    )
   return {
     catalog,
     watermark: { authority: authority.generation, sequence: catalog.sequence, digest },

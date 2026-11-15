@@ -24,6 +24,7 @@ import { signBytes } from './release-keys.mjs'
 
 if (process.platform !== 'win32')
   throw Error('Run the native release gate on Windows x64.')
+const buildOnly = process.argv.includes('--build-only')
 const project = resolve('.'),
   work = join(project, '.work')
 const folder = await mkdtemp(join(work, 'release-check-'))
@@ -91,6 +92,12 @@ function install(exe) {
   )
 }
 const fixtureSpeech = join(checkout, '.work', 'release', 'speech')
+const windowsPowerShell = join(
+  process.env.SystemRoot,
+  'System32',
+  'WindowsPowerShell',
+  'v1.0',
+)
 const issue = async (version, speechVersion, appBuild = true) => {
   const pkg = await jsonFile(join(checkout, 'package.json'))
   await atomicJson(join(checkout, 'package.json'), { ...pkg, version })
@@ -101,7 +108,7 @@ const issue = async (version, speechVersion, appBuild = true) => {
   })
   if (appBuild)
     run(
-      'powershell.exe',
+      join(windowsPowerShell, 'powershell.exe'),
       [
         '-NoProfile',
         '-NonInteractive',
@@ -115,7 +122,10 @@ const issue = async (version, speechVersion, appBuild = true) => {
         compiler,
         '-SkipBuild',
       ],
-      { cwd: checkout },
+      {
+        cwd: checkout,
+        env: { ...process.env, PSModulePath: join(windowsPowerShell, 'Modules') },
+      },
     )
   const tag = appBuild ? 'v' + version : 'speech-test'
   run(node, [join(checkout, 'scripts', 'release-catalog.mjs')], {
@@ -171,22 +181,24 @@ try {
       await copyFile(join(work, 'speech', name), target)
     }
   }
-  console.log('Building and installing the first isolated Windows package.')
+  console.log('Building the first isolated Windows package.')
   const first = await issue('98.1.0', '1.0.0')
-  install(join(first.out, 'En-GYM-Setup.exe'))
-  const receipts = {}
-  for (const id of ['phonon', 'whisper'])
-    receipts[id] = { version: '1.0.0', digest: releaseDigest(first.catalog, id) }
-  await atomicJson(join(paths.work, 'installed.json'), receipts)
-  run(installedNode, ['server/main.ts', '--verify-update'], {
-    cwd: app,
-    env: installedEnv,
-  })
-  const db = new DatabaseSync(dbPath)
-  db.exec(
-    "CREATE TABLE release_probe(value TEXT); INSERT INTO release_probe VALUES('retained')",
-  )
-  db.close()
+  if (!buildOnly) {
+    install(join(first.out, 'En-GYM-Setup.exe'))
+    const receipts = {}
+    for (const id of ['phonon', 'whisper'])
+      receipts[id] = { version: '1.0.0', digest: releaseDigest(first.catalog, id) }
+    await atomicJson(join(paths.work, 'installed.json'), receipts)
+    run(installedNode, ['server/main.ts', '--verify-update'], {
+      cwd: app,
+      env: installedEnv,
+    })
+    const db = new DatabaseSync(dbPath)
+    db.exec(
+      "CREATE TABLE release_probe(value TEXT); INSERT INTO release_probe VALUES('retained')",
+    )
+    db.close()
+  }
   // This check exists only in the second disposable build. A failed migration
   // must restore the original DB along with the old program and speech files.
   const entry = join(checkout, 'server', 'main.ts')
@@ -202,17 +214,26 @@ try {
   )
   const config = componentFiles.phonon.find((n) => n.endsWith('config.json'))
   await appendFile(join(fixtureSpeech, config), '\n')
-  console.log('Building the second package and exercising the signed update handoff.')
+  console.log('Building the second isolated Windows package.')
   const second = await issue('98.2.0', '1.1.0')
-  const stage = () => {
-    // Use the actual installed update module and restart exit code. Its immutable
-    // GitHub URLs resolve to the equivalent local signed release directory in this child.
-    run(
-      installedNode,
-      [
-        '--input-type=module',
-        '-e',
-        `
+  assert.notEqual(
+    first.catalog.components.app.files[0].sha256,
+    second.catalog.components.app.files[0].sha256,
+  )
+  assert.notEqual(
+    releaseDigest(first.catalog, 'phonon'),
+    releaseDigest(second.catalog, 'phonon'),
+  )
+  if (!buildOnly) {
+    const stage = () => {
+      // Use the actual installed update module and restart exit code. Its immutable
+      // GitHub URLs resolve to the equivalent local signed release directory in this child.
+      run(
+        installedNode,
+        [
+          '--input-type=module',
+          '-e',
+          `
       import {openAsBlob} from 'node:fs'
       import {join} from 'node:path'
       const [folder,catalog]=process.argv.slice(1)
@@ -226,71 +247,74 @@ try {
       await u.installUpdates(()=>true)
       const t=setInterval(()=>{const s=u.updateStatus();if(s.state==='error'){clearInterval(t);throw Error(s.message)}},100)
     `,
-        folder,
-        join(second.out, 'catalog.json'),
-      ],
-      { cwd: app, env: installedEnv },
-      75,
-    )
-  }
-  // The external helper runs while no installed Node or tray executable is open.
-  for (const [k, v] of Object.entries(installedEnv))
-    if (k.startsWith('FIELDWORK_') || k === 'EN_GYM_INSTALLED' || k === 'LOCALAPPDATA')
-      process.env[k] = v
-  const options = {
-    profile,
-    install,
-    health: (changed) => installedHealth(paths, changed),
-  }
-  const preserved = () => {
-    const check = new DatabaseSync(dbPath, { readOnly: true })
-    try {
-      assert.equal(
-        check.prepare('SELECT value FROM release_probe').get().value,
-        'retained',
+          folder,
+          join(second.out, 'catalog.json'),
+        ],
+        { cwd: app, env: installedEnv },
+        75,
       )
-    } finally {
-      check.close()
     }
+    // The external helper runs while no installed Node or tray executable is open.
+    for (const [k, v] of Object.entries(installedEnv))
+      if (k.startsWith('FIELDWORK_') || k === 'EN_GYM_INSTALLED' || k === 'LOCALAPPDATA')
+        process.env[k] = v
+    const options = {
+      profile,
+      install,
+      health: (changed) => installedHealth(paths, changed),
+    }
+    const preserved = () => {
+      const check = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        assert.equal(
+          check.prepare('SELECT value FROM release_probe').get().value,
+          'retained',
+        )
+      } finally {
+        check.close()
+      }
+    }
+    await writeFile(join(app, '.fail-health'), 'fixture')
+    stage()
+    // Confirm the health check actually exercised the modified SQLite database.
+    await assert.rejects(applyPrepared(paths, options), (err) => err.code === 80)
+    assert.equal(await installedApp(paths), '98.1.0')
+    assert.equal(
+      (await jsonFile(join(paths.work, 'installed.json'))).phonon.version,
+      '1.0.0',
+    )
+    assert.deepEqual(
+      await readFile(join(paths.speech, config)),
+      await readFile(join(work, 'speech', config)),
+    )
+    preserved()
+    await rm(join(app, '.fail-health'))
+    stage()
+    assert.equal(await applyPrepared(paths, options), 'installed')
+    assert.equal(await installedApp(paths), '98.2.0')
+    assert.equal(
+      (await jsonFile(join(paths.work, 'installed.json'))).phonon.version,
+      '1.1.0',
+    )
+    assert.deepEqual(
+      await readFile(join(paths.speech, config)),
+      await readFile(join(fixtureSpeech, config)),
+    )
+    preserved()
+    run(installedNode, [join(project, 'packaging', 'check-installed.mjs')], {
+      cwd: app,
+      env: installedEnv,
+    })
   }
-  await writeFile(join(app, '.fail-health'), 'fixture')
-  stage()
-  // Confirm the health check actually exercised the modified SQLite database.
-  await assert.rejects(applyPrepared(paths, options), (err) => err.code === 80)
-  assert.equal(await installedApp(paths), '98.1.0')
-  assert.equal(
-    (await jsonFile(join(paths.work, 'installed.json'))).phonon.version,
-    '1.0.0',
-  )
-  assert.deepEqual(
-    await readFile(join(paths.speech, config)),
-    await readFile(join(work, 'speech', config)),
-  )
-  preserved()
-  await rm(join(app, '.fail-health'))
-  stage()
-  assert.equal(await applyPrepared(paths, options), 'installed')
-  assert.equal(await installedApp(paths), '98.2.0')
-  assert.equal(
-    (await jsonFile(join(paths.work, 'installed.json'))).phonon.version,
-    '1.1.0',
-  )
-  assert.deepEqual(
-    await readFile(join(paths.speech, config)),
-    await readFile(join(fixtureSpeech, config)),
-  )
-  preserved()
-  run(installedNode, [join(project, 'packaging', 'check-installed.mjs')], {
-    cwd: app,
-    env: installedEnv,
-  })
   const modelOnly = await issue('98.2.0', '1.1.0', false)
   assert.equal(
     modelOnly.catalog.components.app.files[0].sha256,
     second.catalog.components.app.files[0].sha256,
   )
   console.log(
-    'Two native installer builds passed update, rollback, speech, database, authenticated relaunch and speech-only publication checks.',
+    buildOnly
+      ? 'Built two distinct Windows installers and verified their signed catalogs, speech diff and identical speech-only installer reattachment.'
+      : 'Two native installer builds passed update, rollback, speech, database, authenticated relaunch and speech-only publication checks.',
   )
 } finally {
   if (

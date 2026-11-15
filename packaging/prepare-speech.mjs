@@ -7,11 +7,21 @@ import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { atomicJson, jsonFile, releaseDigest, requireClearActivation, updatePaths, withUpdateLock } from '../server/updates.ts'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const speech = process.env.FIELDWORK_SPEECH
 if (!speech) throw Error('Missing speech component location.')
 const json = async (name) => JSON.parse(await readFile(join(root, name), 'utf8'))
+// Do not pass an interrupted live-app restoration journal into Setup's
+// temporary bootstrap directory. Native recovery uses the real program root.
+const paths = updatePaths()
+await requireClearActivation(paths)
+const activePid = (await jsonFile(join(paths.work, 'native-helper.json')))?.pid
+if (activePid && Number.isSafeInteger(Number(activePid)) && Number(activePid) > 0) {
+  try { process.kill(Number(activePid), 0); throw Error('An En-GYM update is in progress.') }
+  catch (error) { if (error.code !== 'ESRCH') throw error }
+}
 const trust = await json('scripts/release-trust.json')
 if (trust.root) {
   const child = spawn(process.execPath, [join(root, 'scripts/release-bootstrap.mjs')], { windowsHide: true, stdio: 'inherit' })
@@ -21,10 +31,10 @@ if (trust.root) {
   })
   // The signed bootstrap permits this only for the first install when the
   // public catalog is unavailable. Signature or validation errors are fatal.
-  if (code === 20) await prepareBaseline()
+  if (code === 20) await withUpdateLock(paths.work, prepareBaseline)
   else if (code !== 0) throw Error('Could not verify the official component catalog.')
 } else {
-  await prepareBaseline()
+  await withUpdateLock(paths.work, prepareBaseline)
 }
 
 async function matches(path, sha256) {
@@ -54,13 +64,26 @@ async function download(url, path, maximum) {
 }
 
 async function prepareBaseline() {
+  await requireClearActivation(paths)
+  if (await jsonFile(join(paths.work, 'watermark.json'))) throw Error('An existing signed installation needs its verified catalog for repair.')
   const phonon = await json('scripts/phonon-assets.json')
   const asr = await json('packaging/speech-baseline.json')
-  const files = [
-    ...phonon.files.map((f) => ({ ...f, path: join(phonon.folder, f.name) })),
-    asr.model,
-    ...Object.entries(asr.engineFiles).map(([name, sha256]) => ({ path: join('asr', name), sha256 })),
-  ]
+  const versions = await json('scripts/release-versions.json')
+  const components = {
+    phonon: { files: phonon.files.map((f) => ({ ...f, name: phonon.folder + '/' + f.name })) },
+    whisper: { files: [{ ...asr.model, name: asr.model.path },
+      ...Object.entries(asr.engineFiles).map(([name, sha256]) => ({ name: 'asr/' + name, sha256 }))] },
+  }
+  const files = [...components.phonon.files, ...components.whisper.files]
+  const receipts = Object.fromEntries(Object.keys(components).map(id => [
+    id, { version: versions[id].version, digest: releaseDigest({ components }, id) },
+  ]))
+  const receiptPath = join(paths.work, 'installed.json')
+  const current = await jsonFile(receiptPath)
+  if (current !== undefined && (Object.keys(current).length !== 2 || Object.keys(receipts).some(id =>
+    current[id]?.version !== receipts[id].version || current[id]?.digest !== receipts[id].digest))) {
+    throw Error('An existing speech version needs its signed component catalog for repair.')
+  }
   // Reject a redirected download/activation directory before writing anything.
   for (const dir of [dirname(dirname(speech)), dirname(speech), speech, join(speech, phonon.folder), join(speech, 'asr')]) {
     await mkdir(dir, { recursive: true })
@@ -73,8 +96,8 @@ async function prepareBaseline() {
     const tar = join(process.env.SystemRoot, 'System32', 'tar.exe')
     const archive = join(stage, 'whisper.zip')
     for (const [index, file] of files.entries()) {
-      console.log(`${index}/${files.length} ${basename(file.path)}`)
-      const target = join(speech, file.path)
+      console.log(`${index}/${files.length} ${basename(file.name)}`)
+      const target = join(speech, file.name)
       if (await matches(target, file.sha256)) continue
       const temp = join(stage, randomUUID())
       if (file.url) {
@@ -85,7 +108,7 @@ async function prepareBaseline() {
           if (!await matches(archive, asr.engineArchive.sha256)) throw Error('Speech engine package failed verification.')
           members = execFileSync(tar, ['-tf', archive], { encoding: 'utf8', windowsHide: true }).split(/\r?\n/)
         }
-        const names = members.filter((p) => p.split('/').pop() === basename(file.path))
+        const names = members.filter((p) => p.split('/').pop() === basename(file.name))
         if (names.length !== 1) throw Error('Unexpected speech engine package contents.')
         const child = spawn(tar, ['-xOf', archive, names[0]], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
         await Promise.all([pipeline(child.stdout, createWriteStream(temp, { flags: 'wx' })),
@@ -94,10 +117,11 @@ async function prepareBaseline() {
             child.once('exit', (code) => code === 0 ? resolve() : reject(Error('Could not unpack the speech engine.')))
           })])
       }
-      if (!await matches(temp, file.sha256)) throw Error('Speech component failed verification: ' + basename(file.path))
+      if (!await matches(temp, file.sha256)) throw Error('Speech component failed verification: ' + basename(file.name))
       verified.push({ temp, target })
     }
     for (const file of verified) await rename(file.temp, file.target)
+    await atomicJson(receiptPath, receipts)
     console.log(`${files.length}/${files.length} English speech is ready`)
   } finally {
     await rm(stage, { recursive: true, force: true })

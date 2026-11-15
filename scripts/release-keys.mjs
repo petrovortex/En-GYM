@@ -25,8 +25,23 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   const gen = Number(generation)
   if (!Number.isSafeInteger(gen) || gen < 1 || (operation === 'rotate' && gen < 2))
     throw Error('Use a positive signing generation, starting rotation at 2.')
-  const roleName = operation === 'rotate' ? 'release-' + gen : 'release'
+  if (operation === 'init' && gen !== 1)
+    throw Error('Initialize signing at generation 1.')
+  const roleName = gen > 1 ? 'release-' + gen : 'release'
   await mkdir(destination, { recursive: true, mode: 0o700 })
+  const current = await readFile(join(destination, 'delegation.b64'), 'utf8').catch(
+    (e) => {
+      if (e.code !== 'ENOENT') throw e
+    },
+  )
+  if (current) {
+    const cert = JSON.parse(Buffer.from(current, 'base64').toString())
+    const last = JSON.parse(Buffer.from(cert.payload, 'base64').toString()).generation
+    if (gen < last || (operation === 'rotate' && gen === last))
+      throw Error(
+        'The signing generation must be current for renewal, or higher for rotation.',
+      )
+  }
   for (const role of operation === 'init'
     ? ['root', 'release']
     : operation === 'rotate'

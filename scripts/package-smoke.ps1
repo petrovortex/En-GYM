@@ -8,6 +8,10 @@ $sandbox=(New-Item -ItemType Directory -Path (Join-Path $qa ('setup-check-'+[gui
 $app=Join-Path $sandbox 'Installed En-GYM'
 $profile=Join-Path $app 'sandbox-profile'
 $log=Join-Path $sandbox 'setup.log'
+$originalEnv=@{}
+foreach ($key in @('PATH','LOCALAPPDATA','FIELDWORK_SPEECH','FIELDWORK_DATA','FIELDWORK_INSTALL_ROOT','EN_GYM_INSTALLED')) {
+  $originalEnv[$key]=[Environment]::GetEnvironmentVariable($key)
+}
 try {
   # Exercise the end-user path even on runners shipping global Python and Node.
   $env:PATH=[Environment]::SystemDirectory
@@ -32,6 +36,7 @@ try {
   $bytes=(Get-ChildItem -LiteralPath $app -File -Recurse | Measure-Object Length -Sum).Sum
   Write-Output ("Fresh installer, speech download, synthesis, transcription and private server passed ({0:N1} MiB in isolated installation)." -f ($bytes/1MB))
 } finally {
+  foreach ($key in $originalEnv.Keys) { [Environment]::SetEnvironmentVariable($key,$originalEnv[$key]) }
   $verified=Get-Item -LiteralPath $sandbox
   if ($verified.Parent.FullName -ne $qa -or $verified.Name -notmatch '^setup-check-[0-9a-f]{32}$' -or
     ($verified.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Unexpected smoke-test directory.' }
