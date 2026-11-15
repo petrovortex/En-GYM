@@ -1,9 +1,18 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { catalog, sections, type Attempt, type Section } from '../core/types.ts'
+import { promptUrl } from '../core/speech.ts'
+import {
+  catalog,
+  sections,
+  type Attempt,
+  type Section,
+} from '../core/types.ts'
 import { reportRows, points } from '../core/report.ts'
 import { api, date } from './api.ts'
 import { practiceReport, type BandRange } from '../core/bands.ts'
 import { ScoringMethod } from './ScoringMethod.tsx'
+import { SUCCESS_COOLDOWN } from '../core/selection.ts'
+import { WordCapture } from './WordCapture.tsx'
+import { SessionAudio } from './SessionAudio.tsx'
 const rangeText = ({ low, high }: BandRange) =>
   low === high ? String(low) : low + '–' + high
 const duration = (n?: number) =>
@@ -51,7 +60,9 @@ export function Review({
   const item = selectedRow?.q,
     answer = selectedRow?.answer ?? {}
   const index = visible.findIndex((r) => r.q.id === item?.id)
-  const pending = rows.filter((r) => !r.q.keys && r.answer.score === undefined)
+  const pending = rows.filter(
+    (r) => !r.q.keys && r.answer.score === undefined,
+  )
   const pendingSections = new Set(pending.map((r) => r.section))
   const gradeLabel =
     pendingSections.size > 1
@@ -264,7 +275,9 @@ export function Review({
       )}
       {a.retryOf && (
         <p>
-          <a href={'#attempt/' + a.retryOf.id}>Open the original attempt →</a>
+          <a href={'#attempt/' + a.retryOf.id}>
+            Open the original attempt →
+          </a>
         </p>
       )}
       <div className="tabs reviewTabs" aria-label="Results view">
@@ -313,7 +326,9 @@ export function Review({
           </div>
         </div>
         <div
-          className={'reviewWorkspace' + (detailsOpen ? ' showingDetails' : '')}
+          className={
+            'reviewWorkspace' + (detailsOpen ? ' showingDetails' : '')
+          }
         >
           <div className="responseTableWrap">
             <table className="responseTable">
@@ -336,7 +351,9 @@ export function Review({
                         </tr>
                       )}
                     <tr
-                      className={r.q.id === item?.id ? 'selectedResponse' : ''}
+                      className={
+                        r.q.id === item?.id ? 'selectedResponse' : ''
+                      }
                       onClick={() => select(r.q.id)}
                     >
                       <td>{r.number}</td>
@@ -399,7 +416,15 @@ export function Review({
                   Next
                 </button>
               </div>
-              <div className="detailBody" key={item.id}>
+              <WordCapture
+                className="detailBody"
+                key={item.id}
+                attempt={a.id}
+                item={item.id}
+              >
+                <p className="wordCaptureHint">
+                  Select a word or phrase to save it to your vocabulary.
+                </p>
                 <small>
                   Q{selectedRow.number} · {catalog[item.task][1]} ·{' '}
                   {points(item, answer)}
@@ -445,11 +470,11 @@ export function Review({
                   <>
                     <label>
                       Original prompt
-                      <audio
-                        controls
-                        preload="none"
-                        aria-label="Original prompt"
-                        src={'/api/reference?id=' + a.id + '&item=' + item.id}
+                      <SessionAudio
+                        label="Original prompt"
+                        src={promptUrl(
+                          '/api/reference?id=' + a.id + '&item=' + item.id,
+                        )}
                       />
                     </label>
                     <details>
@@ -461,10 +486,8 @@ export function Review({
                 <h3>Your answer</h3>
                 {answer.clip ? (
                   <>
-                    <audio
-                      controls
-                      preload="none"
-                      aria-label="Your recording"
+                    <SessionAudio
+                      label="Your recording"
                       src={'/clips/' + answer.clip + '.wav'}
                     />
                     {!answer.transcript && (
@@ -545,12 +568,18 @@ export function Review({
                 </button>
                 <div className="row">
                   <button
-                    disabled={busy || assessing}
+                    disabled={
+                      busy ||
+                      assessing ||
+                      (answer.score === 1 &&
+                        (a.ended ?? a.started) + SUCCESS_COOLDOWN >
+                          Date.now())
+                    }
                     onClick={() =>
                       start(item.task, { id: a.id, item: item.id })
                     }
                   >
-                    Retry this item
+                    Retry with fresh practice
                   </button>
                   <button
                     disabled={busy || assessing}
@@ -559,7 +588,7 @@ export function Review({
                     Fresh practice →
                   </button>
                 </div>
-              </div>
+              </WordCapture>
             </aside>
           )}
         </div>
@@ -570,7 +599,8 @@ export function Review({
           <span>
             {scope === 'attempt'
               ? 'Entire attempt'
-              : 'Response Q' + rows.find((r) => r.q.id === chatItem)?.number}
+              : 'Response Q' +
+                rows.find((r) => r.q.id === chatItem)?.number}
           </span>
           {scope === 'item' && (
             <button onClick={() => setScope('attempt')}>
@@ -579,7 +609,9 @@ export function Review({
           )}
         </div>
         {!messages.length && (
-          <p>Ask about your results, or use Discuss results for an overview.</p>
+          <p>
+            Ask about your results, or use Discuss results for an overview.
+          </p>
         )}
         <div className="chatLog">
           {messages.map((m, i) => (

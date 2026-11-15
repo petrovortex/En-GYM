@@ -43,6 +43,13 @@ export interface Item {
   evidence?: string
   group?: string
   personal?: boolean
+  quality?: {
+    version: string
+    provider: string
+    model: string
+    checkedAt: number
+    author?: { provider: string; model: string }
+  }
 }
 export interface Answer {
   text?: string
@@ -97,6 +104,7 @@ export interface Trend {
   weakness: Partial<Record<Task, number>>
   due?: Partial<Record<string, number>>
   lastUsed?: Record<string, number>
+  outcomes?: Record<string, { at: number; score: number }>
 }
 export const emptyTrend = (): Trend => ({ seen: [], level: 2, weakness: {} })
 export const current = (a: Attempt) => a.stages[a.stage]?.items[a.index]

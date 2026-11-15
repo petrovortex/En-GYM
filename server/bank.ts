@@ -1,13 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { bank, learnerTrend } from '../core/exam.ts'
-import {
-  catalog,
-  emptyTrend,
-  type Item,
-  type Task,
-  type Stage,
-} from '../core/types.ts'
-import { lastUsed, practiceSets, practiceSize } from '../core/material.ts'
+import { catalog, type Item, type Task, type Stage } from '../core/types.ts'
+import { practiceSets } from '../core/material.ts'
 import { author, fingerprint, type AuthorProgress } from './author.ts'
 import {
   extras,
@@ -15,9 +9,9 @@ import {
   addItem,
   setting,
   configure,
-  exposures,
-  practicedTasks,
   jobs,
+  jobById,
+  completedBankJobs,
   saveJob,
   bankUsage,
   spendBank,
@@ -26,8 +20,18 @@ import {
   save,
   recent,
 } from './store.ts'
-import { preferences } from './provider.ts'
-import { backgroundAllowed } from './work.ts'
+import { preparationModels, ProviderError } from './provider.ts'
+import { AUDIT_SPEC_VERSION } from '../core/task-specs.ts'
+import { backgroundAllowed, bankWorkAllowed } from './work.ts'
+import { QualityError } from '../core/quality.ts'
+import { gameRefillDue, replenishGames } from './games.ts'
+import { inventoryStock } from './inventory.ts'
+import {
+  estimatePreparation,
+  type PreparationSample,
+} from '../core/preparation-progress.ts'
+
+export const MAX_QUALITY_ATTEMPTS = 3
 
 export interface BankJob {
   id: string
@@ -41,8 +45,24 @@ export interface BankJob {
   slots: Item[]
   progress: AuthorProgress
   started?: boolean
+  manualStarted?: boolean
+  failureKind?: 'quality' | 'other'
+  qualityFailures?: number
+  priority?: number
+  cycles?: number
+  workMs?: number
+  workSource?: string
+  timingComplete?: boolean
+  metrics?: {
+    timings?: AuthorProgress['timings']
+    inputChars?: AuthorProgress['inputChars']
+    elapsedMs?: number
+    source?: string
+    units?: number
+  }
 }
 let working = false
+let activeJobId: string | undefined
 class Paused extends Error {}
 export function bankEnabled() {
   return setting('automatic-bank') !== 'off'
@@ -51,31 +71,85 @@ export function setBankEnabled(enabled: boolean) {
   configure('automatic-bank', enabled ? 'on' : 'off')
 }
 export function bankStatus() {
-  const pending = jobs<BankJob>().filter((j) => j.state !== 'done')
+  const stock = inventoryStock(),
+    needed = new Set(stock.filter((s) => s.deficit).map((s) => s.task))
+  const pending = jobs<BankJob>(true).filter(
+    (j) =>
+      j.state !== 'done' &&
+      (j.personal || needed.has(j.task) || j.progress.audited),
+  )
+  const blockedUntil = Number(setting('bank-backoff')) || 0
+  const jobRetry = pending.some((j) => j.retryAfter <= Date.now())
+    ? 0
+    : Math.min(...pending.map((j) => j.retryAfter))
+  const nextRetry = Math.max(
+    blockedUntil,
+    Number.isFinite(jobRetry) ? jobRetry : 0,
+  )
+  const selected = preparationModels()
+  const active = working ? pending.find((j) => j.id === activeJobId) : undefined
+  const waitReason = !bankEnabled()
+    ? 'off'
+    : !selected.configured
+      ? 'connection'
+      : !bankWorkAllowed()
+        ? 'foreground'
+        : !working && nextRetry > Date.now()
+          ? 'retry'
+          : undefined
+  const samples: PreparationSample[] = completedBankJobs<BankJob>()
+    .filter(
+      (j) =>
+        !j.personal &&
+        j.metrics?.elapsedMs &&
+        j.metrics.source &&
+        j.metrics.units,
+    )
+    .map((j) => ({
+      task: j.task,
+      elapsedMs: j.metrics!.elapsedMs!,
+      source: j.metrics!.source!,
+      units: j.metrics!.units!,
+    }))
   return {
     enabled: bankEnabled(),
     ...bankUsage(),
+    onDemandRequests: bankUsage(Date.now(), true).requests,
     pending: pending.length,
+    targetSessions: 3,
+    stock,
+    waitReason,
+    estimate:
+      !waitReason && !pending.some((j) => j.error)
+        ? estimatePreparation(stock, samples, selected.source)
+        : undefined,
+    nextRetry: nextRetry > Date.now() ? nextRetry : undefined,
+    activeTask: active?.task,
+    phase: active?.progress.phase,
     state: !bankEnabled()
       ? 'Off'
-      : !preferences().configured
+      : !preparationModels().configured
         ? 'Connect AI to add fresh material'
-        : !backgroundAllowed()
-          ? 'Paused during practice or AI work'
+        : !bankWorkAllowed()
+          ? 'Waiting for grading or trainer conversation'
           : working
             ? 'Preparing fresh material'
-            : Number(setting('bank-backoff')) > Date.now() ||
-                pending.some((j) => j.retryAfter > Date.now())
-              ? 'Paused; will retry later'
-              : bankUsage().batches >= 4 || bankUsage().requests >= 8
-                ? 'Daily limit reached'
+            : pending.some(
+                  (j) =>
+                    j.failureKind === 'quality' &&
+                    (j.qualityFailures ?? 0) >= MAX_QUALITY_ATTEMPTS,
+                )
+              ? 'Replacing a rejected set; retrying automatically'
+              : Number(setting('bank-backoff')) > Date.now() ||
+                  pending.some((j) => j.retryAfter > Date.now())
+                ? 'Waiting to retry automatically'
                 : pending.length
                   ? 'Queued'
                   : 'Bank ready',
     error: pending.find((j) => j.error)?.error,
   }
 }
-function slotsFor(task: Task, personal: boolean) {
+export function slotsFor(task: Task, personal: boolean) {
   const sets = practiceSets(bank, task)
   const size = sets[0].length
   const counts = bank
@@ -96,12 +170,49 @@ function slotsFor(task: Task, personal: boolean) {
   ).map((q) => ({
     ...q,
     personal,
-    level: personal ? learnerTrend(recent(), task).level : levels[0],
+    level:
+      task === 'repeat' || task === 'interview'
+        ? q.level
+        : personal
+          ? learnerTrend(recent(), task).level
+          : levels[0],
   }))
+}
+export function queueMaterial(task: Task) {
+  const pending = jobs<BankJob>(true).find(
+    (j) => j.task === task && !j.personal && j.state !== 'done',
+  )
+  if (pending) return pending.id
+  const job: BankJob = {
+    id: randomUUID(),
+    task,
+    personal: false,
+    brief:
+      'Create fresh original material with a different topic, purpose and reasoning from the existing bank. This is neutral exam material; do not tailor it to learner scores.',
+    state: 'queued',
+    retryAfter: 0,
+    slots: slotsFor(task, false),
+    progress: {},
+  }
+  saveJob(job)
+  return job.id
+}
+export function resetQualityRetries(task?: string) {
+  for (const job of jobs<BankJob>(true))
+    if (
+      !job.personal &&
+      job.task === task &&
+      job.state === 'paused' &&
+      job.failureKind === 'quality'
+    ) {
+      job.qualityFailures = 0
+      job.retryAfter = 0
+      saveJob(job)
+    }
 }
 export function enqueuePersonal(attempt: string, task: Task, brief: string) {
   const id = 'personal-' + attempt
-  if (jobs<BankJob>().some((j) => j.id === id)) return
+  if (jobById(id)) return
   saveJob({
     id,
     task,
@@ -115,55 +226,123 @@ export function enqueuePersonal(attempt: string, task: Task, brief: string) {
   } as BankJob)
 }
 export function replenish(now = Date.now()) {
-  if (!bankEnabled() || !preferences().configured) return
-  const pending = jobs<BankJob>().filter((j) => j.state !== 'done')
-  const trend = { ...emptyTrend(), lastUsed: exposures() }
-  for (const name of practicedTasks(now - 14 * 86400000)) {
-    const task = name as Task
-    if (!catalog[task] || pending.some((j) => j.task === task && !j.personal))
-      continue
-    const unseen = practiceSets(
-      bank.concat(extras().filter((q) => !q.personal)),
-      task,
-    ).filter((set) => !lastUsed(set, trend)).length
-    if (unseen >= practiceSize(task) * 2) continue
-    saveJob({
-      id: randomUUID(),
-      task,
-      personal: false,
-      brief:
-        'Create a new neutral exam set. Vary genre, communicative purpose, reasoning and sentence structure, not merely names. Balance the requested difficulty without using learner results.',
-      state: 'queued',
-      retryAfter: 0,
-      slots: slotsFor(task, false),
-      progress: {},
-    } as BankJob)
+  if (!bankEnabled() || !preparationModels().configured) return
+  const source = preparationModels().source
+  const oldSource = setting('bank-source')
+  if (oldSource && oldSource !== source) {
+    configure('bank-backoff', '0')
+    configure('bank-provider-failures', '0')
+    for (const job of jobs<BankJob>(true))
+      if (job.failureKind === 'other') {
+        job.retryAfter = 0
+        saveJob(job)
+      }
+  }
+  if (
+    setting('reserve-policy') !== '3' ||
+    setting('bank-source') !== source ||
+    setting('bank-audit-version') !== AUDIT_SPEC_VERSION
+  ) {
+    for (const job of jobs<BankJob>(true).filter((j) => j.state !== 'done')) {
+      if (job.failureKind === 'quality') {
+        job.qualityFailures = 0
+        job.retryAfter = 0
+        if (job.progress.audit)
+          job.progress.feedback = {
+            stage: 'audit-format',
+            issues: [
+              'Recheck the saved draft using the current review contract. Author-only fields are intentionally withheld; masked cloze text is intentional. Validate each quoted evidence fragment separately.',
+            ],
+          }
+        saveJob(job)
+      }
+    }
+    configure('reserve-policy', '3')
+    configure('bank-source', source)
+    configure('bank-audit-version', AUDIT_SPEC_VERSION)
+  }
+  for (const stock of inventoryStock()) {
+    if (!stock.deficit) continue
+    const id = queueMaterial(stock.task)
+    const job = jobById<BankJob>(id)!
+    const priority =
+      (stock.fresh < stock.perSession ? 1000 : 0) +
+      (1 - stock.fresh / stock.target) * 100
+    if (job.priority !== priority) {
+      job.priority = priority
+      saveJob(job)
+    }
   }
 }
-export async function runBank(write: typeof author = author, now = Date.now()) {
+export async function runGameBank(now = Date.now()) {
+  if (working || !preparationModels().configured || Number(setting('bank-backoff')) > now || !gameRefillDue(now)) return
+  working = true
+  try {
+    await replenishGames()
+  } finally {
+    working = false
+  }
+}
+export async function runBank(
+  write: typeof author = author,
+  now = Date.now(),
+  manual?: { id: string; active: () => boolean },
+) {
   if (
     working ||
-    !bankEnabled() ||
-    !preferences().configured ||
-    !backgroundAllowed()
+    (!manual && !bankEnabled()) ||
+    !preparationModels().configured ||
+    !(manual ? backgroundAllowed() : bankWorkAllowed())
   )
     return
-  if (Number(setting('bank-backoff')) > now) return
-  const usage = bankUsage(now)
-  const job = jobs<BankJob>().find(
-    (j) =>
-      j.state !== 'done' &&
-      j.retryAfter <= now &&
-      (j.started || usage.batches < 4) &&
-      (j.progress.audited || usage.requests < 8),
+  if (!manual && Number(setting('bank-backoff')) > now) return
+  const deficits = new Set(
+    inventoryStock()
+      .filter((s) => s.deficit)
+      .map((s) => s.task),
   )
+  const job = jobs<BankJob>(true)
+    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
+    .find(
+      (j) =>
+        j.state !== 'done' &&
+        (manual
+          ? j.id === manual.id
+          : j.retryAfter <= now &&
+            (j.personal || deficits.has(j.task) || j.progress.audited)),
+    )
   if (!job) return
+  if (!manual && (job.qualityFailures ?? 0) >= MAX_QUALITY_ATTEMPTS) {
+    // Retire only the rejected draft, and try a genuinely new context after a cooling-off interval.
+    job.progress = {}
+    job.qualityFailures = 0
+    job.started = false
+  }
   working = true
+  activeJobId = job.id
+  let measuredAt = Date.now()
+  const selected = preparationModels()
+  const workSource = selected.source
+  if (job.workSource !== workSource) {
+    job.workMs = 0
+    // Old, partially prepared drafts have no complete timing history.
+    job.timingComplete =
+      !job.progress.raw ||
+      job.progress.source !==
+        selected.generation.provider + ':' + selected.generation.model
+  }
+  const recordWork = () => {
+    const time = Date.now()
+    job.workMs = (job.workMs ?? 0) + Math.max(0, time - measuredAt)
+    measuredAt = time
+  }
+  job.workSource = workSource
   job.state = 'working'
   job.error = undefined
-  if (!job.started) {
-    spendBank('batch', now)
-    job.started = true
+  if (manual ? !job.manualStarted : !job.started) {
+    spendBank(manual ? 'manual-batch' : 'batch', now)
+    if (manual) job.manualStarted = true
+    else job.started = true
   }
   saveJob(job)
   try {
@@ -174,18 +353,26 @@ export async function runBank(write: typeof author = author, now = Date.now()) {
       job.brief,
       {
         progress: job.progress,
-        persist: () => saveJob(job),
+        persist: () => {
+          recordWork()
+          saveJob(job)
+        },
         checkpoint: (request) => {
-          if (!bankEnabled() || !backgroundAllowed())
+          if (
+            (!manual && !bankEnabled()) ||
+            !(manual ? backgroundAllowed() : bankWorkAllowed()) ||
+            (manual && !manual.active())
+          )
             throw new Paused('Waiting until practice and AI work finish.')
           if (request) {
-            if (bankUsage().requests >= 8)
-              throw new Paused('Daily generation limit reached.')
-            spendBank('request')
+            spendBank(manual ? 'manual-request' : 'request')
           }
         },
       },
     )
+    if (manual && !manual.active())
+      throw new Paused('Session preparation cancelled.')
+    recordWork()
     transaction(() => {
       for (const q of result) addItem(q, fingerprint(q))
       const completed: BankJob = {
@@ -193,6 +380,15 @@ export async function runBank(write: typeof author = author, now = Date.now()) {
         state: 'done',
         progress: {},
         slots: [],
+        failureKind: undefined,
+        metrics: {
+          timings: job.progress.timings,
+          inputChars: job.progress.inputChars,
+          elapsedMs: job.timingComplete ? job.workMs : undefined,
+          source: workSource,
+          units:
+            job.task === 'reply' || job.task === 'sentence' ? result.length : 1,
+        },
       }
       saveJob(completed)
       if (job.attempt) {
@@ -205,22 +401,63 @@ export async function runBank(write: typeof author = author, now = Date.now()) {
         save(a)
       }
     })
+    configure('bank-provider-failures', '0')
+    configure('bank-backoff', '0')
   } catch (error) {
+    recordWork()
     job.state = 'paused'
     job.error = (error as Error).message
-    job.retryAfter = Date.now() + (error instanceof Paused ? 15000 : 3600000)
-    if (!(error instanceof Paused)) {
+    if (error instanceof QualityError) {
+      job.failureKind = 'quality'
+      job.qualityFailures = (job.qualityFailures ?? 0) + 1
+      if (job.qualityFailures >= MAX_QUALITY_ATTEMPTS)
+        job.cycles = (job.cycles ?? 0) + 1
+      job.retryAfter =
+        Date.now() +
+        (job.qualityFailures >= MAX_QUALITY_ATTEMPTS
+          ? Math.min(3600000, 600000 * 2 ** Math.min(3, (job.cycles ?? 1) - 1))
+          : 1000)
+      // Keep only the latest draft/audit and its concrete feedback, never an archive of revisions.
+      job.progress.feedback = { stage: error.stage, issues: error.issues }
+      if (error.stage !== 'audit-format') {
+        job.started = false
+        job.manualStarted = false
+      }
+    } else if (
+      !(error instanceof Paused) &&
+      job.progress.audited &&
+      job.progress.phase === 'audio'
+    ) {
+      // Local speech trouble must not stop generation of Reading/Writing material.
+      job.failureKind = 'other'
+      job.retryAfter = Date.now() + 60000
+    } else if (!(error instanceof Paused)) {
+      job.failureKind = 'other'
+      const failures = Number(setting('bank-provider-failures') || 0) + 1
+      const delay =
+        error instanceof ProviderError && error.kind === 'quota'
+          ? Math.min(3600000, 900000 * 2 ** Math.min(2, failures - 1))
+          : Math.min(900000, 60000 * 2 ** Math.min(4, failures - 1))
+      job.retryAfter = Math.max(
+        Date.now() + delay,
+        error instanceof ProviderError && Number.isFinite(error.retryAt)
+          ? error.retryAt!
+          : 0,
+      )
+      configure('bank-provider-failures', String(failures))
       configure('bank-backoff', String(job.retryAfter))
-      // A new generation attempt is another batch; validated output survives transport/audio failures.
+      // Preserve completed generation/auditing across transport or local-audio failures.
       if (!job.progress.audited) {
         job.started = false
-        job.progress = {}
+        job.manualStarted = false
       }
-    }
+    } else job.retryAfter = Date.now() + 15000
     saveJob(job)
   } finally {
     working = false
+    activeJobId = undefined
   }
+  return jobById<BankJob>(job.id)?.state
 }
 export function migratePreparedMaterial() {
   if (setting('prepared-bank-migrated')) return

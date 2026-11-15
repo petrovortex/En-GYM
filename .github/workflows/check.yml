@@ -1,0 +1,43 @@
+name: Check En-GYM
+on:
+  push:
+    branches: [main, codex/windows-release-check]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: node scripts/check-installed-session.mjs
+      - run: node scripts/vocabulary-check.mjs
+      - run: node scripts/check-site.mjs
+  windows-package:
+    if: github.ref == 'refs/heads/codex/windows-release-check'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Prepare the private runtime and speech components
+        shell: powershell
+        run: .\scripts\start.ps1 -SetupOnly
+      - name: Package En-GYM
+        shell: powershell
+        run: .\scripts\package-windows.ps1
+      - name: Install and exercise the packaged speech tools
+        shell: powershell
+        run: .\scripts\package-smoke.ps1
+      - name: Upgrade two internal builds and recover from a failed update
+        shell: powershell
+        run: .\.work\node-win\node.exe scripts/release-native-check.mjs

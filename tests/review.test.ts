@@ -96,19 +96,20 @@ test('fresh stimuli outrank overdue repeats, then choose least recently used', (
       set.flatMap((q) => materialKeys(q).map((key) => [key, (i + 1) * 1000])),
     ),
   )
-  assert.equal(
-    buildStages(
-      'drill',
-      'passage',
-      99,
-      { ...emptyTrend(), lastUsed },
-      [],
-      'short',
-    )[0].items[0].group,
-    sets[0][0].group,
+  assert.throws(
+    () =>
+      buildStages(
+        'drill',
+        'passage',
+        99,
+        { ...emptyTrend(), lastUsed },
+        [],
+        'short',
+      ),
+    /More fresh material/,
   )
 })
-test('full seed and routing material stay independent of exposure and personal bank', () => {
+test('full seed and routing stay independent of weakness and personal bank given equal exposure', () => {
   const a = buildStages('full', '', 38)
   const extra = { ...bank[0], id: 'private', personal: true }
   assert.deepEqual(
@@ -119,10 +120,7 @@ test('full seed and routing material stay independent of exposure and personal b
       {
         ...emptyTrend(),
         level: 3,
-        seen: bank.map((q) => q.id),
-        lastUsed: Object.fromEntries(
-          bank.flatMap((q) => materialKeys(q).map((k) => [k, 123])),
-        ),
+        weakness: { words: 1 },
       },
       [extra],
     ),
@@ -232,6 +230,15 @@ test('analysis covers all responses, caches reopening, refreshes grades, and sco
   const calls = payloads.length
   await chat(a.id, '', { action: 'analyze' })
   assert.equal(payloads.length, calls)
+  const beforeModelChange = payloads.length
+  setProvider('openai', 'astra-selection-fixture', 'fixture-key')
+  await chat(a.id, '', { action: 'analyze' })
+  assert.ok(payloads.length > beforeModelChange)
+  assert.ok(
+    payloads
+      .slice(beforeModelChange)
+      .every((body) => JSON.parse(body).model === 'astra-selection-fixture'),
+  )
   const updated = store.load(a.id)
   updated.answers[a.stages[0].items[0].id].score = 0.5
   store.save(updated)
@@ -245,7 +252,7 @@ test('analysis covers all responses, caches reopening, refreshes grades, and sco
   assert.equal(last.scope, 'item')
   assert.equal(last.item, a.stages[0].items[0].id)
 })
-test('bank jobs checkpoint, serialize, honor exam/foreground and survive retry without partial admission', async (t) => {
+test('bank jobs run during exams, yield to foreground work and preserve automatic backoff', async (t) => {
   setProvider('openai', 'test-model', 'fixture-key')
   const a = attempt('drill', 'email')
   store.save(a)
@@ -273,15 +280,15 @@ test('bank jobs checkpoint, serialize, honor exam/foreground and survive retry w
   }
   examActivity()
   await runBank(writer)
-  assert.equal(calls, 0)
+  assert.equal(calls, 1)
   examActivity(false)
   await foregroundWork(async () => {
     await runBank(writer)
-    assert.equal(calls, 0)
+    assert.equal(calls, 1)
   })
   const before = store.extras().length
   await Promise.all([runBank(writer), runBank(writer)])
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
   assert.ok(store.extras().length > before)
   replenish()
   await runBank(async (_slots, _personal, _previous, _brief, control) => {
@@ -313,9 +320,11 @@ test('bank jobs checkpoint, serialize, honor exam/foreground and survive retry w
   store.saveJob(failed)
   const beforeLimit = calls
   await runBank(writer)
-  assert.equal(calls, beforeLimit)
-  // An already audited batch can finish local work even after all eight AI requests are spent.
+  assert.equal(calls, beforeLimit + 1) // The old eight-request budget no longer blocks reserve filling.
+  // Already audited work resumes without another provider request.
   failed.started = true
+  failed.priority = 100000
+  failed.state = 'paused'
   failed.progress = { audited: true }
   store.saveJob(failed)
   const atLimit = store.bankUsage(),
@@ -335,8 +344,9 @@ test('bank jobs checkpoint, serialize, honor exam/foreground and survive retry w
   t.mock.method(Date, 'now', () => tomorrow)
   for (let i = 0; i < 4; i++) store.spendBank('batch')
   assert.deepEqual(store.bankUsage(), { batches: 4, requests: 0 })
+  const beforeTomorrow = calls
   await runBank(writer)
-  assert.equal(calls, beforeLimit)
+  assert.equal(calls, beforeTomorrow + 1)
 })
 test('validated legacy mock material migrates once without touching attempt snapshots', () => {
   const a = attempt()
@@ -386,12 +396,33 @@ test('author resumes validated generation at audit without repeating paid genera
               prompt:
                 'Write to a museum about borrowing its field recorder for an oral history project.',
               passage:
-                'Describe the people you will interview. Specify the dates you need the recorder. Ask about the return procedure.',
+                '- Describe the people you will interview.\n- Specify the dates you need the recorder.\n- Ask about the return procedure.',
               evidence:
                 'Address the three requests with suitable register and specific details.',
             },
           ])
-        : 'PASS',
+        : JSON.stringify({
+            checks: {
+              format: true,
+              relevance: true,
+              naturalEnglish: true,
+              difficulty: true,
+              diversity: true,
+            },
+            issues: [],
+            answers: [
+              {
+                index: 0,
+                valid: true,
+                unique: true,
+                solutions: null,
+                support: '',
+                rationale:
+                  'A realistic request with three distinct communicative goals.',
+                distractors: [],
+              },
+            ],
+          }),
     ),
   )
   const slots = [bank.find((q) => q.task === 'email')!]
@@ -417,6 +448,113 @@ test('author resumes validated generation at audit without repeating paid genera
   assert.equal(requests, 2)
   assert.equal(result.length, 1)
   assert.equal(progress.audited, true)
+})
+
+test('author retries malformed audit without regenerating, then repairs content using saved reviewer feedback', async (t) => {
+  setProvider('openai', 'repair-model-fixture', 'fixture-key')
+  const { author } = await import('../server/author.ts')
+  const { QualityError } = await import('../core/quality.ts')
+  const progress: import('../server/author.ts').AuthorProgress = {}
+  const control = { progress, persist: () => {}, checkpoint: () => {} }
+  const flags = {
+    format: true,
+    relevance: true,
+    naturalEnglish: true,
+    difficulty: true,
+    diversity: true,
+  }
+  let generations = 0,
+    audits = 0
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)),
+        input = JSON.parse(request.input[0].content)
+      assert.equal(request.model, 'repair-model-fixture')
+      if (request.instructions.startsWith('Independently')) {
+        audits++
+        assert.equal(input.items[0].keys, undefined)
+        if (audits === 1)
+          return stream(
+            JSON.stringify({ checks: flags, issues: [], answers: [] }),
+          )
+        if (audits === 2) {
+          assert.match(input.auditCorrections.join(' '), /exactly 1 answer/)
+          return stream(
+            JSON.stringify({
+              checks: { ...flags, relevance: false },
+              issues: [
+                'The first two goals overlap; use three distinct requests.',
+              ],
+              answers: [],
+            }),
+          )
+        }
+        return stream(
+          JSON.stringify({
+            checks: flags,
+            issues: [],
+            answers: [
+              {
+                index: 0,
+                valid: true,
+                unique: true,
+                solutions: null,
+                support: '',
+                rationale:
+                  'Three distinct goals make this practical communication task feasible.',
+                distractors: [],
+              },
+            ],
+          }),
+        )
+      }
+      generations++
+      if (generations === 2) {
+        assert.match(input.revision.issues.join(' '), /three distinct requests/)
+        assert.ok(input.revision.previous)
+      }
+      return stream(
+        JSON.stringify([
+          {
+            title: 'Request for an archival photograph',
+            prompt:
+              'Write an email to a curator requesting permission to reproduce an archival photograph in a student exhibit.',
+            passage:
+              '- Identify the photograph you need.\n- Describe how it will be displayed.\n- Ask about permission and attribution.',
+            evidence:
+              'Address all three practical goals with appropriate register.',
+          },
+        ]),
+      )
+    },
+  )
+  const slots = [bank.find((q) => q.task === 'email')!]
+  await assert.rejects(
+    author(slots, false, [], 'A distinct email scenario.', control),
+    (e: unknown) => e instanceof QualityError && e.stage === 'audit-format',
+  )
+  assert.ok(progress.raw)
+  assert.ok(progress.audit)
+  await assert.rejects(
+    author(slots, false, [], 'A distinct email scenario.', control),
+    (e: unknown) => e instanceof QualityError && e.stage === 'audit-content',
+  )
+  assert.equal(generations, 1)
+  assert.equal(audits, 2)
+  const admitted = await author(
+    slots,
+    false,
+    [],
+    'A distinct email scenario.',
+    control,
+  )
+  assert.equal(generations, 2)
+  assert.equal(audits, 3)
+  assert.equal(admitted.length, 1)
+  assert.equal(progress.audited, true)
+  assert.equal(progress.feedback, undefined)
 })
 
 test('version-one database migration backfills exposure while preserving saved responses', async () => {
@@ -457,6 +595,99 @@ test('version-one database migration backfills exposure while preserving saved r
   assert.ok(result.exposure > a.stages[0].items.length)
   assert.deepEqual(result.attempt.answers, a.answers)
   const check = new DatabaseSync(join(folder, 'practice.sqlite'))
-  assert.equal(check.prepare('PRAGMA user_version').get()!.user_version, 2)
+  assert.equal(check.prepare('PRAGMA user_version').get()!.user_version, 5)
   check.close()
+})
+
+test('shared generation and independent review transmit one complete stimulus, without answer keys', async (t) => {
+  setProvider('openai', 'compact-model-fixture', 'fixture-key')
+  const { author } = await import('../server/author.ts')
+  const first = bank.find((q) => q.task === 'daily')!
+  const slots = bank.filter((q) => q.group === first.group).slice(0, 2)
+  const stimulus =
+    'The astronomy club will collect loaned binoculars at the west entrance on Thursday afternoon. Please bring the signed loan receipt with the equipment. Members who cannot attend should contact the treasurer to arrange another return time.'
+  const items = [
+    {
+      title: 'Returning club binoculars',
+      prompt: 'Where should members return the equipment?',
+      options: [
+        'At the west entrance',
+        'At the north gate',
+        'At the science lab',
+        'At the main office',
+      ],
+      keys: ['At the west entrance'],
+      evidence: 'The notice identifies the west entrance.',
+    },
+    {
+      title: 'Returning club binoculars',
+      prompt: 'What should an unavailable member do?',
+      options: [
+        'Contact the treasurer',
+        'Leave equipment outside',
+        'Contact the librarian',
+        'Wait until next term',
+      ],
+      keys: ['Contact the treasurer'],
+      evidence: 'The notice offers an alternative arrangement.',
+    },
+  ]
+  let requests = 0
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (_url: RequestInfo | URL, init?: RequestInit) => {
+      requests++
+      const req = JSON.parse(String(init?.body)),
+        input = JSON.parse(req.input[0].content)
+      if (requests === 1) {
+        assert.match(input.outputShape, /stimulus/)
+        return stream(JSON.stringify({ stimulus, items }))
+      }
+      assert.deepEqual(Object.values(input.contexts), [stimulus])
+      assert.equal(input.items[0].contextId, input.items[1].contextId)
+      assert.ok(
+        input.items.every(
+          (q: Record<string, unknown>) =>
+            q.keys === undefined &&
+            q.evidence === undefined &&
+            q.passage === undefined,
+        ),
+      )
+      return stream(
+        JSON.stringify({
+          checks: {
+            format: true,
+            relevance: true,
+            naturalEnglish: true,
+            difficulty: true,
+            diversity: true,
+          },
+          issues: [],
+          suggestions: [],
+          answers: items.map((q, index) => ({
+            index,
+            valid: true,
+            unique: true,
+            solutions: q.keys,
+            support:
+              index === 0 ? 'at the west entrance' : 'contact the treasurer',
+            rationale:
+              'This option directly matches the specific instruction in the notice.',
+            distractors: q.options
+              .slice(1)
+              .map((option) => ({
+                option,
+                reason:
+                  'This location or action is not the one specified in the notice.',
+              })),
+          })),
+        }),
+      )
+    },
+  )
+  const result = await author(slots, false, [], 'An original club notice.')
+  assert.equal(requests, 2)
+  assert.equal(result.length, 2)
+  assert.ok(result.every((q) => q.passage === stimulus))
 })

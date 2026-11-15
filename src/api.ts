@@ -21,8 +21,25 @@ export interface LiveView {
 }
 export type Session = LiveView | Attempt
 export const isLive = (s: Session): s is LiveView => 'item' in s
+export function browserSession() {
+  return sessionStorage.getItem('en-gym-session')
+}
+export function localFetch(path: string, init?: RequestInit) {
+  const url = new URL(path, window.location.origin)
+  if (url.origin !== window.location.origin) throw Error('Invalid local request.')
+  const headers = new Headers(init?.headers)
+  const token = browserSession()
+  if (token) headers.set('Authorization', 'Bearer ' + token)
+  return fetch(url, { ...init, headers, redirect: 'error', cache: 'no-store' })
+}
+export async function localAudioUrl(path: string, signal?: AbortSignal) {
+  if (!browserSession()) return path
+  const response = await localFetch(path, { signal })
+  if (!response.ok) throw Error('Audio is unavailable. Open En-GYM from its tray icon and try again.')
+  return URL.createObjectURL(await response.blob())
+}
 export async function api<T>(path: string, data?: unknown): Promise<T> {
-  const r = await fetch(
+  const r = await localFetch(
     '/api/' + path,
     data === undefined
       ? {}
@@ -36,15 +53,14 @@ export async function api<T>(path: string, data?: unknown): Promise<T> {
         },
   )
   const result = await r.json()
-  if (!r.ok) throw Error(result.error ?? 'The local service is unavailable.')
+  if (!r.ok)
+    throw Object.assign(
+      Error(result.error ?? 'The local service is unavailable.'),
+      { code: result.code },
+    )
   return result
 }
-export interface Prefs {
-  provider: string
-  model: string
-  configured: boolean
-  models: string[]
-}
+export type Prefs = import('../core/ai.ts').AIPreferences
 export const date = (n: number) =>
   new Intl.DateTimeFormat(undefined, {
     month: 'short',

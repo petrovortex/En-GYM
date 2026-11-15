@@ -58,13 +58,13 @@ test('original bank has unique IDs, workable objective keys and all twelve tasks
     }
   }
 })
-test('both routes meet the 50/47/12/11 blueprint across seeds, independent of history', () => {
+test('both routes meet the 50/47/12/11 blueprint, independent of learner difficulty', () => {
   for (let seed = 0; seed < 20; seed++) {
     const stages = buildStages('full', '', seed)
     assert.deepEqual(
       stages,
       buildStages('full', '', seed, {
-        seen: bank.map((q) => q.id),
+        seen: [],
         level: 3,
         weakness: { words: 1 },
       }),
@@ -135,7 +135,7 @@ test('drills use prior scores and independent mocks never use personal items', (
   const personal = { ...q, id: 'private', personal: true }
   assert.deepEqual(
     buildStages('full', '', 3, trend, [personal]),
-    buildStages('full', '', 3),
+    buildStages('full', '', 3, { ...trend, level: 3, weakness: {} }),
   )
 })
 test('band estimates require substantial completed evidence and weight both writing tasks', () => {
@@ -153,5 +153,5 @@ test('band estimates require substantial completed evidence and weight both writ
       score: q.task === 'sentence' ? 1 : 0,
     }
   updateBands(a)
-  assert.deepEqual(a.bandRanges?.Writing, {low:2.5,high:4.5})
+  assert.deepEqual(a.bandRanges?.Writing, { low: 2.5, high: 4.5 })
 })

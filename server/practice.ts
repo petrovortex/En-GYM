@@ -7,8 +7,11 @@ import {
   type Task,
   type PracticeLength,
 } from '../core/types.ts'
-import { exposures, extras, recent } from './store.ts'
+import { selectionMemory, extras, recent } from './store.ts'
+import { bank } from '../core/exam.ts'
+import { assertSelection } from '../core/selection.ts'
 import { materialSets } from '../core/material.ts'
+import { readySession } from './inventory.ts'
 interface Plan {
   id: string
   seed: number
@@ -22,9 +25,7 @@ export function practicePlan(task: Task, length: PracticeLength = 'standard') {
   if (!catalog[task]) throw Error('Unknown exercise.')
   for (const [id, plan] of plans)
     if (plan.expires < Date.now()) plans.delete(id)
-  const seed = randomBytes(4).readUInt32LE()
-  const trend = { ...learnerTrend(recent(), task), lastUsed: exposures() }
-  const stages = buildStages('drill', task, seed, trend, extras(), length)
+  const { seed, stages } = readySession({ mode: 'drill', focus: task, length })
   const plan: Plan = {
     id: randomUUID(),
     seed,
@@ -49,6 +50,10 @@ export function consumePlan(id: string, task: string) {
   const plan = plans.get(id)
   if (!plan || plan.expires < Date.now() || plan.task !== task)
     throw Error('Practice preview expired. Choose the length again.')
+  assertSelection(plan.stages, {
+    ...learnerTrend(recent(), task),
+    ...selectionMemory(plan.stages.flatMap((s) => s.items)),
+  })
   plans.delete(id)
   return plan
 }

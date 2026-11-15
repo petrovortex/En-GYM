@@ -28,6 +28,7 @@ import {
   practiceSize,
 } from './material.ts'
 import type { PracticeLength } from './types.ts'
+import { assertSelection, coolingDown, MaterialShortage } from './selection.ts'
 export const bank: Item[] = [
   ...reading,
   ...advanced,
@@ -99,16 +100,29 @@ export function buildStages(
   history = emptyTrend(),
   extra: Item[] = [],
   length: PracticeLength = 'standard',
+  now = Date.now(),
 ): Stage[] {
   const rng = random(seed),
-    trend = mode === 'full' ? emptyTrend() : history
+    trend =
+      mode === 'full'
+        ? {
+            ...emptyTrend(),
+            seen: history.seen,
+            lastUsed: history.lastUsed,
+            outcomes: history.outcomes,
+          }
+        : history
   const pool = [...bank, ...extra.filter((q) => mode !== 'full' || !q.personal)]
   const used = new Set<string>()
   function pick(task: Task, count: number, level = 2, grouped = false) {
     const cohesive = grouped && (task === 'repeat' || task === 'interview')
     const candidates = shuffle(
       pool.filter(
-        (q) => q.task === task && !used.has(q.id) && (!cohesive || q.group),
+        (q) =>
+          q.task === task &&
+          !used.has(q.id) &&
+          !coolingDown(q, history, now) &&
+          (!cohesive || q.group),
       ),
       rng,
     )
@@ -129,6 +143,7 @@ export function buildStages(
         grouped && q.group
           ? pool.filter((x) => x.group === q.group && x.task === q.task)
           : [q]
+      if (group.some((item) => coolingDown(item, history, now))) continue
       for (const item of group) {
         used.add(item.id)
         if (picks.length < count) picks.push(item)
@@ -139,7 +154,10 @@ export function buildStages(
           .forEach((x) => used.add(x.id))
     }
     if (picks.length !== count)
-      throw Error('The bank needs more ' + catalog[task][1] + ' items.')
+      throw new MaterialShortage(
+        [task],
+        'The bank needs more eligible ' + catalog[task][1] + ' items.',
+      )
     return picks.map((q) => ({
       ...q,
       options: q.options ? shuffle(q.options, rng) : undefined,
@@ -150,7 +168,12 @@ export function buildStages(
     const task = focus as Task
     if (!catalog[task]) throw Error('Unknown exercise.')
     const count = practiceSize(task, length)
-    const sets = shuffle(practiceSets(pool, task), rng)
+    const sets = shuffle(
+      practiceSets(pool, task).filter((set) =>
+        set.every((q) => !coolingDown(q, history, now)),
+      ),
+      rng,
+    )
     sets.sort(
       (a, b) =>
         lastUsed(a, trend) - lastUsed(b, trend) ||
@@ -166,15 +189,16 @@ export function buildStages(
       keys.forEach((key) => stimuli.add(key))
     }
     if (chosen.length < count)
-      throw Error(
-        'Not enough different material for this length. Choose a shorter session while the bank grows.',
+      throw new MaterialShortage(
+        [task],
+        'Not enough eligible material for this length. Choose a shorter session or wait for fresh material.',
       )
     const items = chosen.flat().map((q) => ({
       ...q,
       options: q.options ? shuffle(q.options, rng) : undefined,
       chunks: q.chunks ? shuffle(q.chunks, rng) : undefined,
     }))
-    return [
+    const result: Stage[] = [
       {
         name: 'Focused practice',
         section: catalog[task][0],
@@ -182,6 +206,8 @@ export function buildStages(
         items,
       },
     ]
+    assertSelection(result, history, now)
+    return result
   }
   const stages: Stage[] = []
   for (const section of [
@@ -262,6 +288,7 @@ export function buildStages(
       })
   }
   if (!stages.length) throw Error('Unknown section.')
+  assertSelection(stages, history, now)
   return stages
 }
 export function begin(a: Attempt, now = Date.now()) {
@@ -360,11 +387,18 @@ export function learnerTrend(attempts: Attempt[], focus: string): Trend {
     totals = new Map<Task, number[]>()
   trend.due = {}
   trend.lastUsed = {}
+  trend.outcomes = {}
   for (const a of attempts) {
     for (const q of a.stages.flatMap((s) => s.items)) {
       const answer = a.answers[q.id]
       if (!answer) continue
       trend.seen.push(q.id)
+      if (
+        a.ended &&
+        answer.score === 1 &&
+        a.ended >= (trend.outcomes[q.id]?.at ?? 0)
+      )
+        trend.outcomes[q.id] = { at: a.ended, score: answer.score }
       for (const key of materialKeys(q))
         trend.lastUsed[key] = Math.max(
           trend.lastUsed[key] ?? 0,

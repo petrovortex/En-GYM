@@ -14,35 +14,37 @@ import {
 } from 'node:fs'
 import { resolve, join, extname, sep } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { LocalSessions, launchPage, launchScript } from './local-session.ts'
+import { promptUrl } from '../core/speech.ts'
 import metadata from '../package.json' with { type: 'json' }
-import {
-  buildStages,
-  bank,
-  learnerTrend,
-  advance,
-  begin,
-  expire,
-  RULES,
-} from '../core/exam.ts'
-import { catalog, current, secondsLimit, emptyTrend } from '../core/types.ts'
-import type { Attempt, Mode, Item, Task } from '../core/types.ts'
+import { bank, advance, begin, expire, RULES } from '../core/exam.ts'
+import { current, secondsLimit } from '../core/types.ts'
+import type { Attempt, Mode, Item, Stage } from '../core/types.ts'
 import {
   history,
   responseHistory,
   load,
   save,
-  recent,
-  extras,
   clips,
   cache,
-  exposures,
+  verifyProfile,
+  timedExamInProgress,
 } from './store.ts'
-import { audioKey, synth, wavInfo, wave } from './speech.ts'
+import {
+  audioKey,
+  synth,
+  wavInfo,
+  wave,
+  voicePack,
+} from './speech.ts'
 import {
   authorize,
   callback,
   preferences,
   setProvider,
+  saveConnection,
+  setModels,
   disconnect,
   verify,
 } from './provider.ts'
@@ -53,17 +55,58 @@ import {
   setBankEnabled,
   replenish,
   runBank,
+  runGameBank,
   migratePreparedMaterial,
 } from './bank.ts'
-import { examActivity, foregroundWork } from './work.ts'
+import { backgroundAllowed, examActivity, foregroundWork } from './work.ts'
+import { checkUpdates, installUpdates, updateStatus } from './updates.ts'
 import { practicePlan, consumePlan } from './practice.ts'
+import { selectSession } from './selection.ts'
+import {
+  prepareSession,
+  continuePreparation,
+  preparationStatus,
+  cancelPreparation,
+  retryPreparation,
+  readyPreparation,
+  completePreparation,
+  preparationPending,
+  currentPreparation,
+} from './preparation.ts'
+import { MaterialShortage } from '../core/selection.ts'
+import {
+  availability,
+  readySession,
+  warmStockAudio,
+  audioReady,
+  promptPath,
+  audioStatus,
+} from './inventory.ts'
 import { assessAttempt } from './assess.ts'
+import {
+  vocabularyWords,
+  vocabularyTexts,
+  removeVocabularyWord,
+  removeVocabularyText,
+} from './store.ts'
+import { addWord, generateVocabularyText } from './vocabulary.ts'
+import { startGame, continueGame, checkAlternatives, recordGameProgress } from './games.ts'
 
-const port = Number(process.env.FIELDWORK_PORT ?? 43127),
+const installed = process.env.EN_GYM_INSTALLED === '1'
+const sessions = installed ? new LocalSessions() : undefined
+const port = Number(process.env.FIELDWORK_PORT ?? (installed ? 43128 : 43127)),
   host = '127.0.0.1:' + port,
   origin = 'http://' + host
-const prompts = resolve(existsSync('prompts') ? 'prompts' : '.work/prompts'),
-  dist = resolve('dist')
+const dist = resolve('dist')
+if (process.argv.includes('--verify-update')) {
+  if (!installed) throw Error('Use the installed profile to verify an update.')
+  verifyProfile()
+  const index = readFileSync(join(dist, 'index.html'), 'utf8')
+  const assets = [...index.matchAll(/(?:src|href)="(\/assets\/[\w.-]+\.(?:js|css))"/g)].map((m) => m[1])
+  if (!assets.some((p) => p.endsWith('.js')) || assets.some((p) => !statSync(join(dist, p)).isFile()))
+    throw Error('The installed interface is incomplete.')
+  process.exit(0)
+}
 const mime: Record<string, string> = {
   '.js': 'text/javascript',
   '.html': 'text/html; charset=utf-8',
@@ -91,18 +134,13 @@ function file(res: ServerResponse, path: string) {
     'Content-Type': mime[extname(path)] ?? 'application/octet-stream',
     'Content-Length': statSync(path).size,
     'Cache-Control': path.endsWith('.wav')
-      ? 'private, max-age=31536000, immutable'
+      ? 'private, no-store'
       : 'no-cache',
   })
   createReadStream(path).pipe(res)
 }
-function audioPath(key: string) {
-  const cached = join(prompts, key + '.wav')
-  return existsSync(cached) ? cached : join(cache, key + '.wav')
-}
 async function prepare(q: Item) {
-  if (q.speech && !existsSync(audioPath(audioKey(q))))
-    await foregroundWork(() => synth(q, cache))
+  if (!audioReady(q)) await foregroundWork(() => synth(q, cache))
 }
 type Live = Attempt & {
   played?: string[]
@@ -136,9 +174,9 @@ function view(a: Live) {
         q.task === 'words' ? q.passage : q.speech ? undefined : q.passage,
     },
     audio: q.speech
-      ? existsSync(audioPath(audioKey(q)))
-        ? '/audio/' + audioKey(q) + '.wav'
-        : '/api/stimulus?id=' + a.id + '&item=' + q.id
+      ? audioReady(q)
+        ? promptUrl('/audio/' + audioKey(q) + '.wav', voicePack)
+        : promptUrl('/api/stimulus?id=' + a.id + '&item=' + q.id, voicePack)
       : null,
     played:
       a.played?.includes(
@@ -157,7 +195,10 @@ function active(id: string): Live {
   }
   return a
 }
+let pendingWrites = 0
+const safeToUpdate = () => !pendingWrites && backgroundAllowed(true) && !timedExamInProgress()
 const server = createServer(async (req, res) => {
+  let countsAsWrite = false
   const out = (data: unknown) => {
     res.writeHead(200, {
       'content-type': 'application/json',
@@ -175,15 +216,18 @@ const server = createServer(async (req, res) => {
     }
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)')
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
     )
     const url = new URL(req.url ?? '/', origin),
       path = url.pathname
-    if (path === '/auth/callback') {
+    if (req.method === 'GET' && path === '/auth/callback') {
       try {
-        await callback(url.searchParams)
+        if (installed && updateStatus().state === 'restarting') throw Error('En-GYM is restarting.')
+        await foregroundWork(() => callback(url.searchParams))
         res.writeHead(303, { Location: '/#settings' }).end()
       } catch (e) {
         res
@@ -192,12 +236,41 @@ const server = createServer(async (req, res) => {
       }
       return
     }
+    if (sessions) {
+      if (req.method === 'GET' && (path === '/launch' || path === '/launch.js')) {
+        const script = path === '/launch.js'
+        res.writeHead(200, {
+          'content-type': script ? 'text/javascript' : 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        }).end(script ? launchScript : launchPage)
+        return
+      }
+      const writing = req.method !== 'GET'
+      if (writing && (req.headers.origin !== origin || req.headers['x-fieldwork'] !== 'local')) {
+        res.writeHead(403).end()
+        return
+      }
+      if (req.method === 'POST' && path === '/api/local-session') {
+        const session = sessions.exchange(JSON.parse((await body(req, 256)).toString()).ticket)
+        if (session) return out({ session })
+        res.writeHead(403).end()
+        return
+      }
+      if ((writing || /^\/(api|clips|audio)\//.test(path)) &&
+          !sessions.authenticated(req.headers.authorization)) {
+        res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ error: 'Open En-GYM from its desktop shortcut or tray icon to reconnect.' }))
+        return
+      }
+      if (updateStatus().state === 'restarting' && path.startsWith('/api/') && path !== '/api/updates/status')
+        throw Error('En-GYM is restarting to apply the update.')
+    }
     if (req.method === 'GET') {
       if (path === '/api/history') return out(history())
       if (path === '/api/voice-preview') {
         const q = bank.find((q) => q.task === 'conversation')!
         await prepare(q)
-        return file(res, audioPath(audioKey(q)))
+        return file(res, promptPath(audioKey(q)))
       }
       if (path === '/api/responses')
         return out(
@@ -208,12 +281,25 @@ const server = createServer(async (req, res) => {
         )
       if (path === '/api/prefs') return out(preferences())
       if (path === '/api/bank') return out(bankStatus())
+      if (path === '/api/availability')
+        return out({
+          sessions: availability(),
+          bank: bankStatus(),
+          audio: audioStatus(),
+        })
+      if (path === '/api/vocabulary')
+        return out({ words: vocabularyWords(), texts: vocabularyTexts() })
+      if (path === '/api/preparation') return out(currentPreparation())
+      if (path.startsWith('/api/preparation/'))
+        return out(preparationStatus(path.split('/').pop()!))
       if (path === '/api/status')
         return out({
-          app: 'TOEFL Trainer',
+          app: 'En-GYM',
           rules: RULES,
           release: metadata.version,
+          speech: voicePack,
         })
+      if (path === '/api/updates/status') return out(updateStatus())
       if (path.startsWith('/api/attempt/')) {
         const a = active(path.split('/').pop()!)
         if (!a.ended) await prepare(current(a))
@@ -227,7 +313,7 @@ const server = createServer(async (req, res) => {
         if (!a.ended || !q?.speech)
           throw Error('No reference recording for this response.')
         await prepare(q)
-        return file(res, audioPath(audioKey(q)))
+        return file(res, promptPath(audioKey(q)))
       }
       if (path === '/api/stimulus') {
         const a = active(url.searchParams.get('id') ?? ''),
@@ -235,10 +321,10 @@ const server = createServer(async (req, res) => {
         if (a.ended || q.id !== url.searchParams.get('item') || !q.speech)
           throw Error('This audio is not the active prompt.')
         await prepare(q)
-        return file(res, audioPath(audioKey(q)))
+        return file(res, promptPath(audioKey(q)))
       }
       if (/^\/audio\/[a-f0-9]{64}\.wav$/.test(path))
-        return file(res, audioPath(path.slice(7, -4)))
+        return file(res, promptPath(path.slice(7, -4)))
       if (/^\/clips\/[a-f0-9-]{36}\.wav$/.test(path))
         return file(res, join(clips, path.slice(7)))
       const filename = resolve(
@@ -255,6 +341,19 @@ const server = createServer(async (req, res) => {
       res.writeHead(403).end()
       return
     }
+    if (path === '/api/updates/check') return out(await checkUpdates())
+    if (path === '/api/updates/install') {
+      if (!installed) throw Error('Install En-GYM to update from Settings.')
+      if (!safeToUpdate()) throw Error('Finish your current activity before updating.')
+      const request = JSON.parse((await body(req, 1024)).toString() || '{}')
+      return out(await installUpdates(safeToUpdate, request.components))
+    }
+    // A slow request body (particularly a recording upload) must finish before
+    // the updater takes its SQLite snapshot and stops this process.
+    if (installed) {
+      countsAsWrite = true
+      pendingWrites++
+    }
     if (path === '/api/record') {
       const wav = await body(req, 4e6),
         { rate, pcm } = wavInfo(wav)
@@ -267,11 +366,15 @@ const server = createServer(async (req, res) => {
         rate !== 16000 ||
         pcm.length > 16000 * 2 * 90
       )
-        throw Error('This recording does not match the active response window.')
+        throw Error(
+          'This recording does not match the active response window.',
+        )
       const samples = pcm.subarray(
         0,
-        Math.max(0, Math.floor(((capture.end - capture.start) * rate) / 1000)) *
-          2,
+        Math.max(
+          0,
+          Math.floor(((capture.end - capture.start) * rate) / 1000),
+        ) * 2,
       )
       if (!samples.length) throw Error('The response window has closed.')
       const key = randomUUID()
@@ -287,6 +390,53 @@ const server = createServer(async (req, res) => {
       return out(view(a))
     }
     const b = JSON.parse((await body(req)).toString() || '{}')
+    if (path === '/api/prepare') {
+      examActivity(false)
+      const result = prepareSession({
+        mode: b.mode,
+        focus: b.mode === 'full' ? 'Full mock' : String(b.focus),
+        length: b.length,
+        retry: b.retry,
+        followUp: b.followUp,
+      })
+      out(result)
+      void continuePreparation().catch((e) =>
+        console.error('Preparation:', e.message),
+      )
+      return
+    }
+    if (path === '/api/cancel-preparation') {
+      cancelPreparation(b.id)
+      return out({ ok: true })
+    }
+    if (path === '/api/retry-preparation') {
+      const result = retryPreparation(String(b.id))
+      out(result)
+      void continuePreparation().catch((e) =>
+        console.error('Preparation:', e.message),
+      )
+      return
+    }
+    if (path === '/api/vocabulary/add') return out(addWord(b))
+    if (path === '/api/games/progress') {
+      recordGameProgress(b.track,b.batch,b.events)
+      return out({ok:true})
+    }
+    if (path === '/api/games/start') {
+      if (b.previous && b.endless === true) return out(continueGame(b.track,b.level,b.focus,b.previous))
+      return out(startGame(b.track, b.level, b.focus, b.endless === true))
+    }
+    if (path === '/api/games/check') return out(await checkAlternatives(b.track, b.answers, b.required))
+    if (path === '/api/vocabulary/remove') {
+      removeVocabularyWord(String(b.id))
+      return out({ ok: true })
+    }
+    if (path === '/api/vocabulary/text')
+      return out(await generateVocabularyText(b))
+    if (path === '/api/vocabulary/remove-text') {
+      removeVocabularyText(String(b.id))
+      return out({ ok: true })
+    }
     if (path === '/api/practice-plan')
       return out(practicePlan(b.task, b.length))
     if (path === '/api/activity') {
@@ -303,48 +453,42 @@ const server = createServer(async (req, res) => {
       if (!['full', 'section', 'drill'].includes(mode))
         throw Error('Unknown mode.')
       const focus = mode === 'full' ? 'Full mock' : String(b.focus)
+      const prepared = b.preparationId
+        ? readyPreparation(b.preparationId)
+        : undefined
+      if (
+        prepared &&
+        (prepared.request.mode !== mode || prepared.request.focus !== focus)
+      )
+        throw Error('Prepared session does not match this request.')
       const planned =
-        mode === 'drill' && b.planId ? consumePlan(b.planId, focus) : undefined
-      const seed = planned?.seed ?? randomBytes(4).readUInt32LE(),
-        trend =
-          mode === 'full'
-            ? emptyTrend()
-            : { ...learnerTrend(recent(), focus), lastUsed: exposures() }
-      const stages =
-        planned?.stages ??
-        (mode === 'drill' && (b.retry || b.followUp)
-          ? [
-              {
-                section: catalog[focus as Task]?.[0],
-                name: 'Focused practice',
-                minutes: 0,
-                items: [] as Item[],
-              },
-            ]
-          : buildStages(mode, focus, seed, trend, extras(), b.length))
-      if (mode === 'drill' && b.followUp) {
-        const f = load(b.followUp).followUp
-        const item = f?.item
-          ? extras().find((q) => q.id === f.item && q.task === focus)
+        !prepared && mode === 'drill' && b.planId
+          ? consumePlan(b.planId, focus)
           : undefined
-        if (!item) throw Error('Follow-up exercise is unavailable.')
-        stages[0].items = item.group
-          ? extras().filter((q) => q.group === item.group)
-          : [item]
-        stages[0].name = 'Trainer follow-up'
-      }
-      let retryOf: Attempt['retryOf']
-      if (mode === 'drill' && b.retry) {
-        const original = load(b.retry.id),
-          item = original.stages
-            .flatMap((s) => s.items)
-            .find((q) => q.id === b.retry.item)
-        if (!original.ended || !item || item.task !== focus)
-          throw Error('Choose a completed item to retry.')
-        stages[0].items = [item]
-        stages[0].name = 'Guided retry'
-        retryOf = { id: original.id, item: item.id }
-      }
+      const ready =
+        !prepared && !planned && !b.retry && !b.followUp
+          ? readySession({ mode, focus, length: b.length })
+          : undefined
+      const seed =
+        prepared?.seed ??
+        planned?.seed ??
+        ready?.seed ??
+        randomBytes(4).readUInt32LE()
+      const selected: { stages: Stage[]; retryOf?: Attempt['retryOf'] } =
+        prepared ??
+        planned ??
+        ready ??
+        selectSession(
+          {
+            mode,
+            focus,
+            length: b.length,
+            retry: b.retry,
+            followUp: b.followUp,
+          },
+          seed,
+        )
+      const { stages, retryOf } = selected
       examActivity()
       await foregroundWork(async () => {
         for (const s of stages)
@@ -368,20 +512,34 @@ const server = createServer(async (req, res) => {
       }
       a.retryOf = retryOf
       if (mode === 'drill')
-        a.practiceLength = planned?.length ?? b.length ?? 'standard'
-      save(a)
+        a.practiceLength =
+          prepared?.request.length ??
+          planned?.length ??
+          b.length ??
+          'standard'
+      if (prepared) completePreparation(prepared.id, () => save(a))
+      else save(a)
       return out(view(a))
     }
     if (path === '/api/connect') return out({ url: authorize(origin) })
     if (path === '/api/disconnect') {
-      disconnect()
+      disconnect(b.provider)
       return out(preferences())
     }
     if (path === '/api/prefs') {
       setProvider(b.provider, String(b.model ?? ''), b.key)
       return out(preferences())
     }
-    if (path === '/api/verify') return out(await foregroundWork(verify))
+    if (path === '/api/connections') {
+      saveConnection(b.provider, String(b.model ?? ''), b.key)
+      return out(preferences())
+    }
+    if (path === '/api/models') {
+      setModels(b.roles)
+      return out(preferences())
+    }
+    if (path === '/api/verify')
+      return out(await foregroundWork(() => verify(b.provider)))
     if (path === '/api/assess') return out(await assessAttempt(b.id))
     if (path === '/api/transcript')
       return out(await foregroundWork(() => localTranscript(b.id, b.item)))
@@ -402,7 +560,9 @@ const server = createServer(async (req, res) => {
         break
       case '/api/play': {
         const key =
-          q.group && !['repeat', 'interview'].includes(q.task) ? q.group : q.id
+          q.group && !['repeat', 'interview'].includes(q.task)
+            ? q.group
+            : q.id
         a.played ??= []
         if (!a.played.includes(key)) a.played.push(key)
         break
@@ -423,7 +583,10 @@ const server = createServer(async (req, res) => {
       }
       case '/api/answer':
         if (!a.itemStarted) throw Error('Start the module first.')
-        ;(a.answers[q.id] ??= {}).text = String(b.text ?? '').slice(0, 40000)
+        ;(a.answers[q.id] ??= {}).text = String(b.text ?? '').slice(
+          0,
+          40000,
+        )
         break
       case '/api/next':
         advance(a)
@@ -455,53 +618,68 @@ const server = createServer(async (req, res) => {
   } catch (e) {
     if (!res.headersSent) {
       res.writeHead(400, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ error: (e as Error).message }))
+      res.end(
+        JSON.stringify({
+          error: (e as Error).message,
+          code:
+            e instanceof MaterialShortage
+              ? 'fresh_material_needed'
+              : undefined,
+        }),
+      )
     } else res.end()
+  } finally {
+    if (countsAsWrite) pendingWrites--
   }
 })
 function openBrowser() {
-  spawn('explorer.exe', [origin], {
+  spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'explorer.exe'), [origin], {
     windowsHide: true,
     stdio: 'ignore',
   }).unref()
 }
-server.on('error', async (e: NodeJS.ErrnoException) => {
-  if (e.code === 'EADDRINUSE' && process.argv.includes('--open')) {
-    try {
-      const running = await (await fetch(origin + '/api/status')).json()
-      if (
-        running.app === 'Fieldwork' ||
-        (running.app === 'TOEFL Trainer' &&
-          running.release !== metadata.version)
-      ) {
-        console.error(
-          'Close the older trainer window, then open Start TOEFL Trainer again.',
-        )
-        process.exitCode = 1
-        return
-      }
-      if (running.app === 'TOEFL Trainer') {
-        openBrowser()
-        return
-      }
-    } catch {}
-  }
-  console.error('Unable to start TOEFL Trainer:', e.message)
+server.on('error', (e: NodeJS.ErrnoException) => {
+  console.error(e.code === 'EADDRINUSE'
+    ? 'En-GYM could not start because its local port is already in use.'
+    : 'Unable to start En-GYM: ' + e.message)
   process.exitCode = 1
 })
 server.listen(port, '127.0.0.1', () => {
-  examActivity() // Give a restored browser time to report whether an exam is active.
+  examActivity(true, 'startup') // Briefly defer background work until the browser restores its session.
   migratePreparedMaterial()
-  const tick = () => {
+  const bankTick = async () => {
     try {
       replenish()
-      void runBank().catch((e) => console.error('Bank:', e.message))
+      await runGameBank()
+      await runBank()
     } catch (e) {
       console.error('Bank:', (e as Error).message)
+    } finally {
+      setTimeout(bankTick, 1000).unref()
     }
   }
-  setInterval(tick, 15000).unref()
-  tick()
-  console.log('TOEFL Trainer is ready at ' + origin)
-  if (process.argv.includes('--open')) openBrowser()
+  const audioTick = async () => {
+    try {
+      await warmStockAudio()
+    } catch (e) {
+      console.error('Audio:', (e as Error).message)
+    } finally {
+      setTimeout(audioTick, 1000).unref()
+    }
+  }
+  // Warming installed material should not wait for a slow provider response.
+  void bankTick()
+  void audioTick()
+  if (sessions) {
+    const control = createInterface({ input: process.stdin, terminal: false })
+    control.on('line', (command) => {
+      if (command === 'OPEN') process.stdout.write('EN_GYM_OPEN ' + origin + '/launch#' + sessions.ticket() + '\n')
+      if (command === 'QUIT') control.close()
+    })
+    control.on('close', () => server.close(() => process.exit(0)))
+    process.stdout.write('EN_GYM_READY\n')
+  } else {
+    console.log('En-GYM is ready at ' + origin)
+    if (process.argv.includes('--open')) openBrowser()
+  }
 })

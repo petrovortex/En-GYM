@@ -1,36 +1,26 @@
-# TOEFL Trainer
+# En-GYM
 
-Practice TOEFL iBT on your Windows PC: full mocks, sections, focused exercises, and saved speaking recordings.
+Independent practice for the TOEFL iBT® test on Windows. Take timed mock tests, record speaking answers, review your results and build a vocabulary collection from your practice.
 
 ## Start practicing
 
-1. On this GitHub page, click **Code → Download ZIP**.
-2. Right-click the downloaded ZIP and choose **Extract All**.
-3. Open the extracted folder and double-click **Start TOEFL Trainer.cmd**. Windows may hide the `.cmd` extension.
-4. Keep the launcher window open. On the first run it downloads the tools, dependencies and English speech models, then opens your browser.
-5. Choose a mock or exercise. For speaking, allow microphone access when asked.
+1. Open the [En-GYM website](https://petrovortex.github.io/En-GYM/) and choose **Download for Windows**.
+2. Open **En-GYM-Setup.exe**. Stay connected while it downloads the practice voices and speech recognition. If Windows asks to install the Microsoft Visual C++ Runtime, allow it to finish.
+3. Open **En-GYM** from the desktop or Start menu. In the browser, choose **Settings → Microphone and sound → Check microphone** and allow microphone access.
+4. Choose **Try Listen and Repeat** for a first speaking exercise. Find your answer and its recording in **History**.
 
-Next time, double-click the same launcher. Close its window when you finish. If a download fails, reconnect to the internet and open it again.
+Use Windows 10 or 11 on an Intel or AMD 64-bit PC, with a current Edge or Chrome browser. Setup includes its own Node.js. You do not need to install Node.js, npm or Python.
 
-## What you need
+## While you practice
 
-- **Windows 10 or 11, 64-bit Intel/AMD**, and an up-to-date **Edge or Chrome** browser. This launcher does not support macOS, Linux or Windows ARM.
-- Internet for the first setup and for AI grading, discussion and new exercise generation. Installed practice material, history and recordings work offline.
-- The Windows tools **Windows PowerShell**, **curl.exe** and **tar.exe**. These are included with current Windows installations; the launcher tells you if one is missing.
-- A microphone for speaking. Windows may also ask permission to install **Microsoft Visual C++ Runtime**, needed by local speech tools.
+- **Practice** offers full mocks, sections and individual task types. Prepared exercises and recordings work offline.
+- **History** opens the report for a completed attempt. Select a response to see the question, answer and recording. **Grade writing** and **Grade speaking** evaluate submitted work. **Discuss results** opens a conversation about the whole attempt.
+- **Vocabulary** keeps words with their original sentences. Try a word game or choose several words and ask for a reading passage.
 
-**You do not need to install Node.js, npm or Python.** The launcher downloads its own Node.js and app dependencies. Speech runs locally without Python.
+Connect an AI provider in **Settings** for grading, chat and new exercises. These features use the provider’s allowance or API billing. Speech synthesis and transcription run on your PC. Your recordings stay in your Windows profile. Practice scores are estimates.
 
-## Review and improve
+The green book icon in the Windows notification area opens En-GYM again. **Quit** stops the app and background preparation. To check for a new version of the app or its speech tools, open **Settings → Updates**.
 
-After practice, open **Report**. Select a row to see the question, your answer and any recording; use **Previous / Next** to move through responses.
+[Practice guide](https://petrovortex.github.io/En-GYM/guide.html) · [Developer and release instructions](docs/development.md)
 
-Reading, Listening and Build a Sentence are scored automatically. For extended writing and speaking, connect your account in **Settings → AI trainer**, then use **Grade writing / Grade speaking** on the results page. **Discuss results** asks the trainer to analyze the whole attempt. **Ask about this response** focuses the conversation on one answer.
-
-Exercises offer **Short / Standard / Long** sessions. When fresh material runs low, the app can add checked exercises automatically using your AI account: at most four batches and eight generation/review requests per 24 hours. This pauses during tests and can be switched off in Settings. AI calls use your provider's allowance or API billing. Recordings stay on your computer; the trainer receives relevant text and measurements.
-
-Scores are practice estimates, not official TOEFL results. The scoring method is available on the results page.
-
-## For developers
-
-The launcher also prepares the development dependencies. Run `.work\node-win\npm.cmd test` for tests or `.work\node-win\npm.cmd run build` to check and build the UI. Local tools and build files are generated on this computer and are not stored in Git.
+TOEFL iBT is a registered trademark of ETS. En-GYM is independent and is not endorsed by ETS.

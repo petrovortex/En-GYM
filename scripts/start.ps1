@@ -10,7 +10,7 @@ try {
     }
   }
   if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64' -and $env:PROCESSOR_ARCHITEW6432 -ne 'AMD64') {
-    throw 'TOEFL Trainer needs an Intel or AMD 64-bit Windows computer.'
+    throw 'En-GYM needs an Intel or AMD 64-bit Windows computer.'
   }
   $work = Join-Path $root '.work'
   New-Item -ItemType Directory -Path $work -Force | Out-Null
@@ -18,12 +18,12 @@ try {
   try {
     $lock = [IO.File]::Open((Join-Path $work 'setup.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
   } catch {
-    throw 'Setup is already running. Keep the first TOEFL Trainer window open.'
+    throw 'Setup is already running. Keep the first En-GYM window open.'
   }
   try {
     $runtime = Join-Path $work 'node-win'
     if (!(Test-Path -LiteralPath "$runtime/ready-24.22.2") -or !(Test-Path -LiteralPath "$runtime/npm.cmd") -or !(Test-Path -LiteralPath "$runtime/node_modules/npm/bin/npm-cli.js") -or !(Test-Path -LiteralPath "$runtime/node.exe")) {
-      Write-Host 'Downloading the tools TOEFL Trainer needs to run...'
+      Write-Host 'Downloading the development runtime for En-GYM...'
       Invoke-InBuildDirectory {
         param($stage)
         $zip = Join-Path $stage 'node.zip'
@@ -58,17 +58,27 @@ try {
     }
     $stamp = Join-Path $work 'dependencies.sha256'
     $hash = (Get-FileHash -LiteralPath 'package-lock.json').Hash
-    $install = !(Test-Path -LiteralPath $stamp) -or (Get-Content -LiteralPath $stamp -Raw).Trim() -ne $hash -or !(Test-Path 'node_modules/jose/package.json') -or !(Test-Path 'node_modules/.bin/vite.cmd')
+    $install = !(Test-Path -LiteralPath $stamp) -or (Get-Content -LiteralPath $stamp -Raw).Trim() -ne $hash -or !(Test-Path 'node_modules/jose/package.json') -or !(Test-Path 'node_modules/.bin/vite.cmd') -or !(Test-Path 'node_modules/phonon-tts/wasm/phonon_tts_bg.wasm')
     if ($install) {
       Write-Host 'Installing the app...'
       & "$runtime/npm.cmd" ci --include=dev --no-fund --no-audit --loglevel=error
       if ($LASTEXITCODE) { throw 'The app download did not finish. Check your connection and open the launcher again.' }
       Set-Content -LiteralPath $stamp -Value $hash
     }
-    $speechFiles = @('tts/sherpa-onnx-offline-tts.exe','tts/onnxruntime.dll','tts/onnxruntime_providers_shared.dll','asr/whisper-cli.exe','asr/whisper.dll','asr/ggml.dll','asr/ggml-base.dll','asr/ggml-cpu.dll','asr/SDL2.dll','kokoro-en-v0_19/model.onnx','kokoro-en-v0_19/voices.bin','kokoro-en-v0_19/tokens.txt','kokoro-en-v0_19/espeak-ng-data/en_dict','ggml-base.en-q5_1.bin')
-    if ($speechFiles | Where-Object { !(Test-Path -LiteralPath (Join-Path "$work/speech" $_)) }) {
+    $phononManifestPath = Join-Path $PSScriptRoot 'phonon-assets.json'
+    $phononManifest = Get-Content -LiteralPath $phononManifestPath -Raw | ConvertFrom-Json
+    $speechFiles = @('asr/whisper-cli.exe','asr/whisper.dll','asr/ggml.dll','asr/ggml-base.dll','asr/ggml-cpu.dll','asr/SDL2.dll','ggml-base.en-q5_1.bin')
+    $speechFiles += $phononManifest.files | ForEach-Object { $phononManifest.folder + '/' + $_.name }
+    $voiceStamp = Join-Path $work 'speech/phonon-assets.sha256'
+    $voiceHash = (Get-FileHash -LiteralPath $phononManifestPath).Hash
+    $voiceSetup = !(Test-Path -LiteralPath $voiceStamp) -or (Get-Content -LiteralPath $voiceStamp -Raw).Trim() -ne $voiceHash
+    if ($voiceSetup -or ($speechFiles | Where-Object { !(Test-Path -LiteralPath (Join-Path "$work/speech" $_)) })) {
       Write-Host 'Downloading the English voices and the offline speech recognizer...'
       & (Join-Path $PSScriptRoot 'speech-tools.ps1')
+    } else {
+      # Verify the small voice installation on each launch; replace damaged downloads automatically.
+      & "$runtime/node.exe" (Join-Path $PSScriptRoot 'install-phonon.mjs')
+      if ($LASTEXITCODE) { throw 'The local voices need repair. Check your internet connection and open the launcher again.' }
     }
     $sources = Get-ChildItem src,core -File -Recurse
     $sources += Get-Item -LiteralPath 'index.html','package.json','tsconfig.json'
@@ -82,7 +92,7 @@ try {
     $lock.Dispose()
   }
   if (!$SetupOnly) {
-    Write-Host 'Keep this window open while you practice. Close it when you finish.'
+    Write-Host 'Keep this window open for practice and background replenishment. You can close the browser; closing this window stops the app.'
     & "$runtime/node.exe" server/main.ts --open
     exit $LASTEXITCODE
   }

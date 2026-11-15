@@ -8,4 +8,7 @@ dist/
 *.wav
 *.zip
 .env*
+*.pem
+*.pfx
+*.key
 

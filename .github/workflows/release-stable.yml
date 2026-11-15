@@ -1,0 +1,86 @@
+name: Publish stable release
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Publish the app and compatible speech packs, or refresh only speech and the catalog
+        type: choice
+        options: [app, speech]
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: en-gym-stable-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && github.repository == 'petrovortex/En-GYM'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '24.22.2' }
+      - name: Embed public trust and prepare pinned dependencies
+        shell: pwsh
+        env:
+          EN_GYM_ROOT_PUBLIC_KEY: ${{ vars.EN_GYM_ROOT_PUBLIC_KEY }}
+        run: |
+          if (-not $env:EN_GYM_ROOT_PUBLIC_KEY) { throw 'Configure the public update root before building.' }
+          node --input-type=module -e "import {readFileSync} from 'node:fs'; import {createPublicKey as key} from 'node:crypto'; const cfg=JSON.parse(readFileSync('scripts/release-trust.json')); if(!cfg.root || !key(cfg.root).equals(key(process.env.EN_GYM_ROOT_PUBLIC_KEY))) throw Error('Public root does not match the reviewed source pin')"
+          & ./scripts/start.ps1 -SetupOnly
+      - run: npm test
+      - name: Build the verified Windows installer
+        shell: powershell
+        run: .\scripts\package-windows.ps1
+      - name: Smoke-test the installer in an isolated Windows profile
+        if: inputs.kind == 'app'
+        shell: powershell
+        run: .\scripts\package-smoke.ps1
+      - name: Verify two independent installer builds, migration rollback and component-only publication
+        run: node scripts/release-native-check.mjs
+      - name: Collect speech artifacts
+        shell: pwsh
+        run: |
+          node --input-type=module -e "import {copyFileSync,mkdirSync} from 'node:fs'; import {dirname,join} from 'node:path'; import {componentFiles} from './core/updates.ts'; for(const f of [...componentFiles.phonon,...componentFiles.whisper]){ const dest=join('.work/release-input/speech',f);mkdirSync(dirname(dest),{recursive:true});copyFileSync(join('.work/speech',f),dest) }"
+          if ('${{ inputs.kind }}' -eq 'app') { Copy-Item -LiteralPath .work/release/En-GYM-Setup.exe -Destination .work/release-input/En-GYM-Setup.exe }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stable-input
+          path: .work/release-input/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+  publish:
+    needs: build
+    runs-on: windows-2022
+    environment: stable
+    permissions: { contents: write }
+    env:
+      RELEASE_KIND: ${{ inputs.kind }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '24.22.2' }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: stable-input, path: .work/release }
+      - name: Select tag and retrieve prior stable metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $tag = if ($env:RELEASE_KIND -eq 'app') { "v$v" } else { "speech-$env:GITHUB_RUN_ID" }
+          "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          node scripts/release-publish.mjs previous
+      - name: Sign and verify catalog
+        run: node scripts/release-catalog.mjs
+        env:
+          EN_GYM_ROOT_PUBLIC_KEY: ${{ vars.EN_GYM_ROOT_PUBLIC_KEY }}
+          EN_GYM_DELEGATION_B64: ${{ vars.EN_GYM_DELEGATION_B64 }}
+          EN_GYM_RELEASE_PRIVATE_KEY: ${{ secrets.EN_GYM_RELEASE_PRIVATE_KEY }}
+      - name: Publish completed draft
+        run: node scripts/release-publish.mjs publish
+        env:
+          GH_TOKEN: ${{ github.token }}

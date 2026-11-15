@@ -22,7 +22,7 @@ const qa = resolve('.work/qa')
 mkdirSync(qa, { recursive: true })
 assert.equal(realpathSync(qa), join(realpathSync('.'), '.work', 'qa'))
 const data = mkdtempSync(join(qa, 'run-'))
-let server, browser
+let server, browser, synthesizer
 async function launch() {
   server = spawn(process.execPath, ['server/main.ts'], {
     cwd: resolve('.'),
@@ -90,7 +90,9 @@ try {
   page.on('pageerror', (e) => errors.push(e.message))
   const start = performance.now()
   await page.goto(origin)
-  await page.getByRole('heading', { name: 'Practice desk' }).waitFor()
+  await page
+    .getByRole('heading', { name: 'Full-length mock test' })
+    .waitFor()
   console.log(
     'Local home ready in',
     Math.round(performance.now() - start),
@@ -108,9 +110,38 @@ try {
   await page
     .getByRole('button', { name: 'Finish recording' })
     .waitFor({ timeout: 20000 })
+  // Exercise the actual local TTS engine while the browser captures microphone input.
+  synthesizer = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import {synth} from './server/speech.ts';
+    console.log('starting');
+    await synth({id:'background-qa',task:'talk',level:2,title:'Concurrent local audio',prompt:'Listen.',speech:'Students who observe the same garden over several weeks can notice patterns that a single visit would miss. Changes in sunlight, rainfall and temperature affect plants in different ways. Recording the date and location of each observation allows the group to compare results carefully.'},process.env.QA_AUDIO);
+  `,
+    ],
+    {
+      env: { ...process.env, QA_AUDIO: join(data, 'concurrent-audio') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  )
+  let synthesisError = ''
+  synthesizer.stderr.on('data', (b) => {
+    synthesisError += String(b)
+  })
+  const synthesized = new Promise((resolve) =>
+    synthesizer.once('exit', resolve),
+  )
+  await new Promise((resolve) => synthesizer.stdout.once('data', resolve))
   await delay(1300)
   await page.getByRole('button', { name: 'Finish recording' }).click()
   await page.getByText('Recording saved', { exact: true }).waitFor()
+  assert.equal(await synthesized, 0, synthesisError)
+  console.log(
+    'Speaking capture stayed responsive during concurrent local speech synthesis.',
+  )
   await page.reload()
   await page.getByText('Recording saved', { exact: true }).waitFor()
   await page.locator('audio[controls]').evaluate(async (a) => {
@@ -119,7 +150,8 @@ try {
   })
   for (let i = 0; i < 7; i++) {
     await page.getByRole('button', { name: 'Next →' }).click()
-    if (i < 6) await page.getByText('Question ' + (i + 2) + ' of 7').waitFor()
+    if (i < 6)
+      await page.getByText('Question ' + (i + 2) + ' of 7').waitFor()
   }
   await page
     .getByRole('button', { name: 'Discuss results', exact: true })
@@ -173,7 +205,9 @@ try {
     first = await (await fetch(origin + '/api/attempt/' + fullId)).json()
   await page.reload()
   await page.getByText('Question 1 of 12').waitFor()
-  const after = await (await fetch(origin + '/api/attempt/' + fullId)).json()
+  const after = await (
+    await fetch(origin + '/api/attempt/' + fullId)
+  ).json()
   assert.equal(first.deadline, after.deadline)
   const step = () =>
     page.evaluate(async () => {
@@ -181,7 +215,9 @@ try {
       const text = document.querySelector('.examTools>span').textContent
       const changed = new Promise((resolve) => {
         const obs = new MutationObserver(() => {
-          if (document.querySelector('.examTools>span')?.textContent !== text) {
+          if (
+            document.querySelector('.examTools>span')?.textContent !== text
+          ) {
             obs.disconnect()
             resolve(performance.now() - start)
           }
@@ -200,7 +236,11 @@ try {
   const timings = []
   for (let i = 0; i < 8; i++) timings.push(await step())
   timings.sort((a, b) => a - b)
-  console.log('Cached question transition median', Math.round(timings[4]), 'ms')
+  console.log(
+    'Cached question transition median',
+    Math.round(timings[4]),
+    'ms',
+  )
   await page.getByRole('button', { name: '← Back' }).click()
   await page.getByText('Question 8 of 12').waitFor()
   let v = await (await fetch(origin + '/api/attempt/' + fullId)).json()
@@ -226,10 +266,12 @@ try {
           ? q.keys.slice(0, 7).concat(['', '', '']).join('|')
           : q.keys
             ? i % 5 === 0
-              ? (q.options?.find((o) => o !== q.keys[0]) ?? 'Incorrect fixture')
+              ? (q.options?.find((o) => o !== q.keys[0]) ??
+                'Incorrect fixture')
               : q.keys[0]
             : 'I would choose the earlier appointment because it leaves enough time to prepare. Please let me know whether a place is available.',
-      score: q.task === 'words' ? 0.7 : q.keys ? (i % 5 === 0 ? 0 : 1) : 0.6,
+      score:
+        q.task === 'words' ? 0.7 : q.keys ? (i % 5 === 0 ? 0 : 1) : 0.6,
       elapsed: 23 + i,
       reviewed: !q.keys,
       note: q.keys
@@ -240,6 +282,10 @@ try {
   fixtureDb
     .prepare('UPDATE attempts SET snapshot=? WHERE id=?')
     .run(JSON.stringify(v), fullId)
+  for (const [item, answer] of Object.entries(v.answers))
+    fixtureDb
+      .prepare('UPDATE responses SET score=? WHERE attempt=? AND item=?')
+      .run(answer.score, fullId, item)
   fixtureDb.close()
   await page.reload()
   await page
@@ -247,7 +293,9 @@ try {
     .waitFor()
   await page.getByRole('columnheader', { name: 'Band (1–6)' }).waitFor()
   assert.equal(
-    await page.getByRole('columnheader', { name: 'Previous scale' }).count(),
+    await page
+      .getByRole('columnheader', { name: 'Previous scale' })
+      .count(),
     0,
   )
   await page.getByRole('rowheader', { name: 'Overall' }).waitFor()
@@ -299,17 +347,36 @@ try {
     }
   }
   // Reading-only practice offers discussion, never a no-op AI grading button.
-  let reading = await post('start', { mode: 'section', focus: 'Reading' })
+  // The successful full-mock fixture can exhaust an entire section under the new rules.
+  // Verify that the old direct endpoint refuses a repeat-heavy session, then review a fresh drill.
+  const shortage = await fetch(origin + '/api/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-fieldwork': 'local' },
+    body: JSON.stringify({ mode: 'section', focus: 'Reading' }),
+  })
+  assert.equal(shortage.status, 400)
+  assert.equal((await shortage.json()).code, 'fresh_material_needed')
+  let reading = await post('start', {
+    mode: 'drill',
+    focus: 'passage',
+    length: 'short',
+  })
   while (!reading.ended) {
     if (!reading.itemStarted)
-      reading = await post('begin', { id: reading.id, item: reading.item.id })
+      reading = await post('begin', {
+        id: reading.id,
+        item: reading.item.id,
+      })
     reading = await post('next', { id: reading.id, item: reading.item.id })
   }
   await page.goto(origin + '/#attempt/' + reading.id)
   await page
     .getByRole('button', { name: 'Discuss results', exact: true })
     .waitFor()
-  assert.equal(await page.getByRole('button', { name: /^Grade / }).count(), 0)
+  assert.equal(
+    await page.getByRole('button', { name: /^Grade / }).count(),
+    0,
+  )
   await page.route('**/api/chat', async (route) => {
     const request = route.request().postDataJSON()
     assert.equal(request.scope, 'attempt')
@@ -328,7 +395,9 @@ try {
     .click()
   await page.getByText('Entire attempt', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Q1', exact: true }).click()
-  await page.getByRole('button', { name: 'Ask about this response' }).click()
+  await page
+    .getByRole('button', { name: 'Ask about this response' })
+    .click()
   await page.getByText('Response Q1', { exact: true }).waitFor()
   await page.unroute('**/api/chat')
   console.log(
@@ -340,7 +409,9 @@ try {
   await page
     .getByRole('button', { name: 'Discuss results', exact: true })
     .waitFor()
-  await page.getByRole('button', { name: 'Retry this item' }).click()
+  await page
+    .getByRole('button', { name: 'Retry with fresh practice' })
+    .click()
   await page.getByRole('button', { name: 'Begin exercise' }).click()
   await page.evaluate(() => {
     navigator.mediaDevices.getUserMedia = async () => {
@@ -353,26 +424,322 @@ try {
     .filter({ hasText: 'Microphone unavailable' })
     .waitFor({ timeout: 30000 })
   await page.getByRole('button', { name: 'Next →' }).click()
-  await page.getByRole('link', { name: 'Open the original attempt' }).waitFor()
+  let retry = await (
+    await fetch(origin + '/api/attempt/' + page.url().split('/').pop())
+  ).json()
+  assert.ok(
+    !retry.ended,
+    'Retry must include fresh responses after the original item.',
+  )
+  while (!retry.ended)
+    retry = await post('next', { id: retry.id, item: retry.item.id })
+  await page.reload()
+  await page
+    .getByRole('link', { name: 'Open the original attempt' })
+    .waitFor()
   console.log(
     'History drill-down, linked retry and microphone-denial recovery passed.',
   )
   await page.goto(origin + '/#settings')
-  await page.getByRole('heading', { name: 'Microphone and sound' }).waitFor()
-  await page.getByRole('heading', { name: 'AI trainer', exact: true }).waitFor()
+  await page
+    .getByRole('heading', { name: 'Microphone and sound' })
+    .waitFor()
+  await page
+    .getByRole('heading', { name: 'AI trainer', exact: true })
+    .waitFor()
   const voice = page.getByLabel('Preview local voices')
+  const voiceUrl = await voice.getAttribute('src')
+  assert.match(voiceUrl, /[?&]voice=phonon-/)
+  const voiceResponse = await fetch(origin + voiceUrl)
+  assert.ok(voiceResponse.ok)
+  assert.match(voiceResponse.headers.get('cache-control'), /no-store/)
   await voice.evaluate(async (el) => {
     await el.play()
     el.pause()
   })
-  assert.equal(await page.getByRole('button', { name: /generate/i }).count(), 0)
+  assert.equal(
+    await page.getByRole('button', { name: /generate/i }).count(),
+    0,
+  )
   console.log('Local voice preview and Settings passed.')
+  // Separate account connections from model assignments; never use a real key in UI checks.
+  const aiPrefs = {
+    provider: 'chatgpt',
+    model: 'gpt-6-astra',
+    configured: true,
+    models: ['gpt-6-astra', 'fast-review-fixture'],
+    roles: Object.fromEntries(
+      ['trainer', 'generation', 'review'].map((role) => [
+        role,
+        {
+          provider: 'chatgpt',
+          model: 'gpt-6-astra',
+          configured: true,
+          models: ['gpt-6-astra', 'fast-review-fixture'],
+        },
+      ]),
+    ),
+    connections: {
+      chatgpt: {
+        configured: true,
+        model: 'gpt-6-astra',
+        models: ['gpt-6-astra', 'fast-review-fixture'],
+      },
+      openai: { configured: false, model: '', models: [] },
+      gemini: { configured: false, model: '', models: [] },
+      mercury: { configured: false, model: 'mercury-3', models: [] },
+    },
+  }
+  const connectionCalls = []
+  await page.route('**/api/prefs', (route) =>
+    route.fulfill({ json: aiPrefs }),
+  )
+  await page.route('**/api/connections', async (route) => {
+    const b = route.request().postDataJSON()
+    assert.equal(b.provider, 'mercury')
+    assert.equal(b.key, 'browser-fixture-not-a-real-key')
+    assert.equal(b.model, 'mercury-3')
+    aiPrefs.connections.mercury.configured = true
+    connectionCalls.push('save')
+    await route.fulfill({ json: aiPrefs })
+  })
+  await page.route('**/api/verify', async (route) => {
+    assert.equal(route.request().postDataJSON().provider, 'mercury')
+    connectionCalls.push('verify')
+    await route.fulfill({ json: aiPrefs })
+  })
+  await page.route('**/api/models', async (route) => {
+    const { roles } = route.request().postDataJSON()
+    assert.deepEqual(roles.generation, {
+      provider: 'chatgpt',
+      model: 'gpt-6-astra',
+    })
+    assert.deepEqual(roles.trainer, {
+      provider: 'chatgpt',
+      model: 'gpt-6-astra',
+    })
+    assert.deepEqual(roles.review, {
+      provider: 'mercury',
+      model: 'mercury-3',
+    })
+    for (const [role, value] of Object.entries(roles))
+      aiPrefs.roles[role] = {
+        ...value,
+        configured: true,
+        models: aiPrefs.connections[value.provider].models,
+      }
+    await route.fulfill({ json: aiPrefs })
+  })
+  await page.reload()
+  await page
+    .getByRole('combobox', { name: 'Provider', exact: true })
+    .selectOption('mercury')
+  assert.equal(
+    await page.getByLabel('Connection test model').inputValue(),
+    'mercury-3',
+  )
+  await page
+    .getByLabel('API key', { exact: true })
+    .fill('browser-fixture-not-a-real-key')
+  await page
+    .getByRole('button', { name: 'Save and test connection', exact: true })
+    .click()
+  await page
+    .getByText(
+      'Connected. A test request completed. Choose where to use this model below.',
+      { exact: true },
+    )
+    .waitFor()
+  assert.equal(
+    await page.getByLabel('API key', { exact: true }).inputValue(),
+    '',
+  )
+  assert.equal(
+    await page.getByLabel('Create exercises model').inputValue(),
+    'gpt-6-astra',
+  )
+  await page.getByLabel('Review exercises provider').selectOption('mercury')
+  assert.equal(
+    await page.getByLabel('Review exercises model').inputValue(),
+    'mercury-3',
+  )
+  await page
+    .getByRole('button', { name: 'Save model choices', exact: true })
+    .click()
+  await page.getByText('Model choices saved.', { exact: true }).waitFor()
+  assert.deepEqual(connectionCalls, ['save', 'verify'])
+  await page.reload()
+  await page.getByLabel('Review exercises model').waitFor()
+  assert.equal(
+    await page.getByLabel('Review exercises model').inputValue(),
+    'mercury-3',
+  )
+  assert.equal(
+    await page.getByLabel('Create exercises model').inputValue(),
+    'gpt-6-astra',
+  )
+  await page
+    .getByRole('combobox', { name: 'Provider', exact: true })
+    .selectOption('mercury')
+  for (const width of [1366, 390]) {
+    await page.setViewportSize({ width, height: 850 })
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    )
+    await page
+      .locator('.aiSettings')
+      .screenshot({ path: join(qa, 'ai-models-' + width + '.png') })
+  }
+  for (const path of ['prefs', 'connections', 'verify', 'models'])
+    await page.unroute('**/api/' + path)
+  console.log(
+    'Mercury key entry, independent assignments, refresh persistence and responsive Settings passed.',
+  )
+  // Simulate reserve progress while keeping actual ready Writing sessions usable.
+  const stock = await (await fetch(origin + '/api/availability')).json()
+  stock.sessions['section:Listening'] = {
+    state: 'material',
+    missing: ['reply'],
+  }
+  stock.bank.activeTask = 'reply'
+  stock.bank.phase = 'reviewing'
+  stock.bank.state = 'Preparing fresh material'
+  stock.bank.enabled = true
+  stock.bank.waitReason = undefined
+  stock.bank.estimate = { minMinutes: 35, maxMinutes: 55 }
+  let preparationCalls = 0
+  await page.route('**/api/availability', (route) =>
+    route.fulfill({ json: stock }),
+  )
+  await page.route('**/api/prepare', (route) => {
+    preparationCalls++
+    return route.fulfill({
+      status: 500,
+      json: { error: 'Start must not generate' },
+    })
+  })
+  await page.goto(origin + '/#desk')
+  await page
+    .getByRole('heading', { name: 'Full-length mock test' })
+    .waitFor()
+  assert.equal(await page.locator('.stockStatus').count(), 0)
+  await page.goto(origin + '/#practice')
+  await page.getByRole('button', { name: 'Listening', exact: true }).click()
+  await page
+    .getByText('Waiting for fresh material', { exact: true })
+    .first()
+    .waitFor()
+  assert.equal(
+    await page.getByRole('button', { name: 'Start section' }).isDisabled(),
+    true,
+  )
+  assert.equal(await page.getByRole('dialog').count(), 0)
+  assert.equal(await page.locator('.stockStatus').count(), 0)
+  for (const width of [1366, 390]) {
+    await page.setViewportSize({ width, height: 850 })
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    )
+    assert.ok(
+      await page.locator('.taskList small').first().isVisible(),
+      'Available exercise lengths stay visible on small screens',
+    )
+    await page.screenshot({
+      path: join(qa, 'reserve-' + width + '.png'),
+      fullPage: true,
+    })
+  }
+  await page.goto(origin + '/#settings')
+  await page
+    .getByText('About 35–55 min to fill reserve', { exact: true })
+    .waitFor()
+  assert.equal(await page.getByRole('progressbar').count(), 4)
+  await page.locator('.stockDetails summary').focus()
+  await page.keyboard.press('Enter')
+  await page.locator('.stockBreakdown').waitFor()
+  assert.ok((await page.getByText(/recordings? left/).count()) > 0)
+  await page.locator('.stockDetails summary').click()
+  stock.bank.waitReason = 'retry'
+  stock.bank.nextRetry = Date.now() + 900000
+  await page.getByText(/^Retry at /).waitFor()
+  assert.equal(
+    await page
+      .getByText('About 35–55 min to fill reserve', { exact: true })
+      .count(),
+    0,
+  )
+  stock.bank.waitReason = undefined
+  stock.bank.nextRetry = undefined
+  stock.bank.estimate = undefined
+  await page.getByText('Estimating time…', { exact: true }).waitFor()
+  await page.goto(origin + '/#settings')
+  await page
+    .getByRole('heading', { name: 'Automatic preparation', exact: true })
+    .waitFor()
+  for (const width of [1366, 390]) {
+    await page.setViewportSize({ width, height: 850 })
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    )
+    await page
+      .locator('.settingsList .panel')
+      .nth(1)
+      .screenshot({
+        path: join(qa, 'preparation-settings-' + width + '.png'),
+      })
+  }
+  await page.route('**/api/bank', async (route) => {
+    stock.bank.enabled = route.request().postDataJSON().enabled
+    stock.bank.waitReason = stock.bank.enabled ? undefined : 'off'
+    await route.fulfill({ json: stock.bank })
+  })
+  const automatic = page.getByRole('checkbox', {
+    name: 'Prepare fresh exercises in the background',
+  })
+  await automatic.uncheck()
+  await page.getByText('Preparation off', { exact: true }).waitFor()
+  await automatic.check()
+  await page.getByText('Filling reserve', { exact: true }).waitFor()
+  await page.unroute('**/api/bank')
+  await page.goto(origin + '/#practice')
+  await page.getByRole('button', { name: 'Listening', exact: true }).click()
+  stock.sessions['section:Listening'] = { state: 'ready', missing: [] }
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('button')].some(
+      (b) => b.textContent.includes('Start section') && !b.disabled,
+    ),
+  )
+  await page.getByRole('button', { name: 'Writing', exact: true }).click()
+  await page.getByRole('button', { name: /Write an Email/ }).click()
+  await page.getByRole('button', { name: 'Short', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Start practice', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Begin exercise' }).waitFor()
+  const ready = await (
+    await fetch(origin + '/api/attempt/' + page.url().split('/').pop())
+  ).json()
+  assert.equal(ready.itemStarted, 0)
+  assert.equal(ready.deadline, 0)
+  assert.equal(preparationCalls, 0)
+  await page.unroute('**/api/availability')
+  await page.unroute('**/api/prepare')
+  console.log(
+    'Reserve UI: blocked mode, other ready modes, automatic enabling, mobile/desktop and immediate start without generation passed.',
+  )
   assert.equal(outbound.length, 0, outbound.join(', '))
   assert.equal(errors.length, 0, errors.join(', '))
   console.log(
     'Finished offline four-section mock. No external browser requests. No page errors.',
   )
 } finally {
+  if (synthesizer && synthesizer.exitCode === null) synthesizer.kill()
   try {
     await browser?.close()
   } finally {

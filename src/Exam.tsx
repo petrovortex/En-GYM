@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
+import { WordCapture } from './WordCapture.tsx'
 import { catalog } from '../core/types.ts'
-import { api, isLive } from './api.ts'
+import { api, isLive, localFetch, localAudioUrl } from './api.ts'
+import { SessionAudio } from './SessionAudio.tsx'
 import type { LiveView, Session } from './api.ts'
-import { microphone, stopStream, toWave } from './audio.ts'
+import { microphone, stopStream, toWave, waitForMicrophoneRelease } from './audio.ts'
 const time = (seconds: number) =>
   Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')
 export function Exam({
@@ -28,7 +30,8 @@ export function Exam({
     [clip, setClip] = useState(s.answer.clip)
   const audio = useRef<HTMLAudioElement | null>(null),
     rec = useRef<MediaRecorder | null>(null),
-    stream = useRef<MediaStream | null>(null)
+    stream = useRef<MediaStream | null>(null),
+    openingMic = useRef(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null),
     pending = useRef(Promise.resolve()),
     latest = useRef(text),
@@ -40,16 +43,29 @@ export function Exam({
     : 0
   const post = (name: string, data: object = {}) =>
     api<Session>(name, { id: s.id, item: q.id, ...data })
+  function releaseMicrophone() {
+    if (stream.current) stopStream(stream.current)
+    stream.current = null
+  }
+  function finishRecording() {
+    if (rec.current?.state === 'recording') rec.current.stop()
+    releaseMicrophone()
+  }
   useEffect(() => {
     alive.current = true
     const tick = setInterval(() => setNow(Date.now()), 200)
     return () => {
       alive.current = false
       clearInterval(tick)
-      audio.current?.pause()
+      if (audio.current) {
+        audio.current.onended = null
+        audio.current.onerror = null
+        audio.current.pause()
+        if (audio.current.src.startsWith('blob:')) URL.revokeObjectURL(audio.current.src)
+        audio.current = null
+      }
       if (timer.current) clearTimeout(timer.current)
-      if (rec.current?.state === 'recording') rec.current.stop()
-      if (stream.current) stopStream(stream.current)
+      finishRecording()
     }
   }, [])
   useEffect(() => {
@@ -70,7 +86,7 @@ export function Exam({
       now >= responseEnd &&
       rec.current?.state === 'recording'
     )
-      rec.current.stop()
+      finishRecording()
   }, [recording, now, responseEnd])
   function queueSave(value: string) {
     const job = pending.current.then(async () => {
@@ -112,8 +128,17 @@ export function Exam({
     })
   }
   async function startRecording() {
-    if (rec.current?.state === 'recording' || !alive.current) return
+    if (openingMic.current || rec.current?.state === 'recording' || !alive.current) return
+    openingMic.current = true
+    try {
+      await recordResponse()
+    } finally {
+      openingMic.current = false
+    }
+  }
+  async function recordResponse() {
     const v = await post('response')
+    if (!alive.current) return
     if (!isLive(v) || v.item.id !== q.id) {
       update(v)
       return
@@ -137,21 +162,27 @@ export function Exam({
         if (e.data.size) parts.push(e.data)
       }
       r.onstop = async () => {
-        stopStream(source)
+        if (stream.current === source) releaseMicrophone()
         setRecording(false)
         setSaving(true)
         try {
           const wav = await toWave(new Blob(parts, { type: r.mimeType }))
-          const res = await fetch('/api/record?id=' + s.id + '&item=' + q.id, {
-            method: 'POST',
-            headers: { 'x-fieldwork': 'local' },
-            body: wav,
-          })
+          const res = await localFetch(
+            '/api/record?id=' + s.id + '&item=' + q.id,
+            {
+              method: 'POST',
+              headers: { 'x-fieldwork': 'local' },
+              body: wav,
+            },
+          )
           const result = await res.json()
           if (!res.ok) throw Error(result.error)
           if (alive.current) {
             setClip(result.answer?.clip)
-            if (s.mode !== 'drill') update(await post('next'))
+            if (s.mode !== 'drill') {
+              const next = await post('next')
+              if (alive.current) update(next)
+            }
           }
         } catch (e) {
           if (alive.current) err((e as Error).message)
@@ -160,36 +191,48 @@ export function Exam({
         }
       }
       if (v.responseUntil <= Date.now()) {
-        stopStream(source)
+        releaseMicrophone()
         err('The response window has closed. Continue to the next item.')
         return
       }
       r.start(200)
       setRecording(true)
     } catch (e) {
-      stopStream(source)
+      releaseMicrophone()
       throw e
     }
   }
   async function listen() {
+    if (openingMic.current || stream.current) return
     await action(async () => {
-      const player = new Audio(s.audio!)
+      if (audio.current?.src.startsWith('blob:')) URL.revokeObjectURL(audio.current.src)
+      const player = new Audio()
       audio.current = player
+      const url = await localAudioUrl(s.audio!)
+      if (!alive.current || audio.current !== player) {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+        return
+      }
+      player.src = url
+      await waitForMicrophoneRelease()
+      if (!alive.current || audio.current !== player) return
       player.onended = () => {
         setPlaying(false)
         setHeard(true)
-        if (s.limit && !clip)
-          startRecording().catch(() =>
-            err(
-              'Microphone unavailable. Allow microphone access, then select Record. You can also continue without recording.',
-            ),
-          )
+        if (s.limit && !clip) void action(async () => {
+          try {
+            await startRecording()
+          } catch {
+            throw Error('Microphone unavailable. Allow microphone access, then select Record. You can also continue without recording.')
+          }
+        })
       }
       player.onerror = () => {
         setPlaying(false)
         err('Audio could not play. Check your output device and retry.')
       }
       await player.play()
+      if (!alive.current || audio.current !== player) return
       setPlaying(true)
       await post('play')
     })
@@ -207,7 +250,7 @@ export function Exam({
     return (
       <div className="exam">
         <div className="examBar">
-          <b>TOEFL Trainer</b>
+          <b>En-GYM</b>
           <span>{s.section}</span>
         </div>
         <div className="directions">
@@ -246,7 +289,7 @@ export function Exam({
   return (
     <div className="exam">
       <div className="examBar">
-        <b>TOEFL Trainer</b>
+        <b>En-GYM</b>
         <span>
           {s.section} &nbsp; / &nbsp; {s.stageName}
         </span>
@@ -272,7 +315,9 @@ export function Exam({
           </button>
         </div>
       </div>
-      <div
+      <WordCapture
+        attempt={s.id}
+        item={q.id}
         className={
           'examBody ' + (q.passage && q.task !== 'words' ? 'split' : '')
         }
@@ -361,7 +406,9 @@ export function Exam({
                       <button
                         key={i}
                         onClick={() =>
-                          change(selected.filter((_, j) => j !== i).join(' | '))
+                          change(
+                            selected.filter((_, j) => j !== i).join(' | '),
+                          )
                         }
                       >
                         {v} ×
@@ -410,7 +457,7 @@ export function Exam({
                       : 'Your response'}
               </strong>
               {clip && s.mode === 'drill' && (
-                <audio controls src={'/clips/' + clip + '.wav'} />
+                <SessionAudio label="Your recording" src={'/clips/' + clip + '.wav'} />
               )}
               <button
                 disabled={
@@ -421,7 +468,7 @@ export function Exam({
                   (!!clip && s.mode !== 'drill')
                 }
                 onClick={() =>
-                  recording ? rec.current?.stop() : action(startRecording)
+                  recording ? finishRecording() : action(startRecording)
                 }
               >
                 {recording
@@ -434,7 +481,7 @@ export function Exam({
           )}
           {cardError}
         </section>
-      </div>
+      </WordCapture>
     </div>
   )
 }

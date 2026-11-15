@@ -3,8 +3,19 @@ export async function microphone() {
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
   })
 }
+let playbackReadyAt = 0
 export function stopStream(stream: MediaStream) {
   stream.getTracks().forEach((t) => t.stop())
+  playbackReadyAt = performance.now() + 1200
+}
+// Sound devices can take a moment to switch from capture back to playback.
+// The deadline survives the transition to the next exam item.
+export async function waitForMicrophoneRelease() {
+  let remaining = playbackReadyAt - performance.now()
+  while (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, Math.ceil(remaining)))
+    remaining = playbackReadyAt - performance.now()
+  }
 }
 export async function toWave(blob: Blob) {
   const context = new AudioContext()

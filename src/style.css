@@ -12,11 +12,23 @@
   --paper: #fcfcf7;
   --gold: #af8139;
 }
+html {
+  scroll-padding-top: 100px;
+}
 * {
   box-sizing: border-box;
 }
 body {
+  margin: 0;
   min-width: 320px;
+}
+.appHeader {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.homeMain {
+  padding-top: 32px;
 }
 button,
 input,
@@ -173,7 +185,7 @@ footer,
   color: #fffdf3;
   border-radius: 10px;
 }
-.hero h2 {
+.hero h1 {
   font:
     normal clamp(30px, 4vw, 42px)/1.12 Georgia,
     serif;
@@ -671,8 +683,27 @@ footer {
     display: grid;
     gap: 8px;
   }
+  .taskList button {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) 16px;
+    gap: 4px 12px;
+  }
+  .taskList .num {
+    grid-row: 1 / 3;
+  }
+  .taskList b {
+    grid-column: 2;
+  }
   .taskList small {
-    display: none;
+    display: block;
+    grid-column: 2;
+    grid-row: 2;
+    margin-left: 0;
+    font-size: 12px;
+  }
+  .taskList button > span:last-child {
+    grid-column: 3;
+    grid-row: 1 / 3;
   }
   .pagehead {
     padding: 24px 0 16px;
@@ -743,6 +774,66 @@ footer {
 .settingsList select,
 .settingsList input {
   max-width: 440px;
+}
+.aiSettings h3 {
+  font:
+    600 15px/1.5 'Segoe UI',
+    Arial,
+    sans-serif;
+  margin: 0;
+}
+.aiConnection,
+.aiAssignments {
+  display: grid;
+  gap: 14px;
+}
+.aiConnection {
+  padding: 8px 0 22px;
+  border-bottom: 1px solid var(--line);
+}
+.aiConnection > button,
+.aiAssignments > button {
+  justify-self: start;
+}
+.aiAssignments > p {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+.aiRole {
+  margin: 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+.aiRole legend {
+  font-weight: 600;
+  padding: 0 6px;
+  font-size: 14px;
+}
+.aiRoleFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.aiRoleFields label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.aiRoleFields input,
+.aiRoleFields select {
+  width: 100%;
+  min-width: 0;
+  font-size: 14px;
+}
+.aiRole > small {
+  margin-top: 8px;
+}
+@media (max-width: 500px) {
+  .aiRoleFields {
+    grid-template-columns: 1fr;
+  }
 }
 .scoreReport {
   margin: 0 0 32px;
@@ -968,7 +1059,7 @@ footer {
 }
 .responseDetail {
   position: sticky;
-  top: 16px;
+  top: 88px;
   max-height: 78vh;
   overflow: auto;
   background: var(--paper);
@@ -1173,3 +1264,765 @@ footer {
   font-size: 9px;
   padding-left: 2px;
 }
+/* Preparation is a quiet status panel, separate from the app header. */
+.stockStatus {
+  margin: 28px 0 0;
+  padding: 22px 24px 16px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.stockHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.stockStatus h2 {
+  margin: 0 0 4px;
+  font:
+    600 17px/1.4 'Segoe UI',
+    Arial,
+    sans-serif;
+}
+.stockHeading p {
+  margin: 0;
+  max-width: 600px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.stockState {
+  flex-shrink: 0;
+  border-radius: 20px;
+  padding: 4px 10px;
+  background: #e8efdf;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+}
+.stockState.paused {
+  background: #f1eee3;
+  color: #695b3f;
+}
+.stockGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+  margin: 22px 0 18px;
+}
+.stockSectionTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.stockStatus h3 {
+  margin: 0;
+  font:
+    600 14px/1.5 'Segoe UI',
+    Arial,
+    sans-serif;
+}
+.stockSectionTitle span {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.stockSection progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+  margin: 10px 0;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #e8ebe1;
+  accent-color: #69866a;
+}
+.stockSection progress::-webkit-progress-bar {
+  background: #e8ebe1;
+  border-radius: 4px;
+}
+.stockSection progress::-webkit-progress-value {
+  background: #69866a;
+  border-radius: 4px;
+}
+.stockSection progress::-moz-progress-bar {
+  background: #69866a;
+  border-radius: 4px;
+}
+.stockRemaining {
+  display: block;
+  min-height: 40px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stockReadiness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stockReadiness::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #b5bcae;
+}
+.stockReadiness.ready {
+  color: var(--green);
+  font-weight: 600;
+}
+.stockReadiness.ready::before {
+  background: #5c845a;
+}
+.stockActivity {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px 24px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stockActivity strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+.stockDetails {
+  margin-top: 14px;
+  font-size: 12px;
+}
+.stockDetails summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--green);
+  padding: 3px 0;
+}
+.stockDetails summary:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 3px;
+}
+.stockBreakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px 40px;
+  margin: 20px 0;
+}
+.stockBreakdown dl {
+  margin: 10px 0 0;
+}
+.stockBreakdown dl div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid #e8ebe1;
+}
+.stockBreakdown dd {
+  flex-shrink: 0;
+  margin: 0;
+  color: var(--muted);
+}
+.stockDetails p {
+  max-width: 800px;
+  color: var(--muted);
+}
+.stockError {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.stockSettings {
+  display: inline-block;
+  font-size: 12px;
+  margin-top: 10px;
+}
+.stockEmbedded {
+  padding: 20px 0 0;
+  margin: 22px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.stockEmbedded .stockGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.stockUsage {
+  display: block;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.stockLoading {
+  color: var(--muted);
+}
+.stockScoped {
+  margin-top: 16px;
+  padding: 18px 22px 14px;
+}
+.stockScoped .stockGrid {
+  grid-template-columns: 1fr;
+  margin: 14px 0;
+}
+.stockScoped .stockRemaining {
+  min-height: 0;
+}
+.stockScoped .stockSectionTitle h3 {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.stockScoped .stockBreakdown {
+  grid-template-columns: 1fr;
+  max-width: 600px;
+}
+.stockScoped .stockDetails {
+  margin-top: 10px;
+}
+.stockScoped .stockSettings {
+  margin-top: 6px;
+}
+@media (max-width: 700px) {
+  .stockStatus {
+    padding: 18px;
+    margin-top: 22px;
+  }
+  .stockHeading {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .stockGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px 18px;
+  }
+  .stockRemaining {
+    min-height: 40px;
+  }
+  .stockBreakdown {
+    grid-template-columns: 1fr;
+  }
+  .stockEmbedded {
+    padding: 18px 0 0;
+  }
+}
+
+/* Vocabulary: a quiet collection and a focused writing space. */
+.vocabularyHeading {
+  padding-bottom: 20px;
+}
+.vocabularyHeading h1 {
+  margin-bottom: 14px;
+}
+.vocabularyTabs {
+  margin-bottom: 24px;
+}
+.vocabularyTabs button span {
+  margin-left: 8px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.vocabularyLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+  align-items: start;
+  gap: 28px;
+}
+.wordCollection {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--paper);
+}
+.wordCollectionTools {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.wordCollectionTools input,
+.vocabularyComposer input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid #b9c5b5;
+  background: #fffef9;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--ink);
+}
+.wordCollectionTools input::placeholder,
+.vocabularyComposer input::placeholder {
+  color: #69776b;
+}
+.wordCollectionTools form {
+  display: flex;
+  gap: 8px;
+}
+.wordSelectionBar {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 12px 20px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+  background: #f2f4eb;
+}
+.wordSelectionBar span {
+  margin-right: auto;
+}
+.wordSelectionBar .textLink {
+  font-size: 12px;
+}
+.wordList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.wordList > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.wordList > li:last-child {
+  border-bottom: 0;
+}
+.wordList > li.wordSelected {
+  background: #edf2e7;
+}
+.wordList input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  margin: 6px 0 0;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+.wordEntry {
+  flex: 1;
+  min-width: 0;
+}
+.wordTerm {
+  display: inline-flex;
+  gap: 12px;
+  align-items: baseline;
+  font:
+    24px/1.25 Georgia,
+    serif;
+  color: var(--ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.wordTerm span {
+  font:
+    15px 'Segoe UI',
+    sans-serif;
+  color: #6b7d68;
+}
+.openWordText {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}
+a.wordTerm:hover, .openWordText:hover {
+  text-decoration: underline;
+}
+.wordContext {
+  margin: 9px 0 6px;
+  color: #526254;
+  font-size: 14px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wordContext mark,
+.vocabularyProse mark {
+  background: #e1ebd2;
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.wordEntry > small {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.wordRemove {
+  padding: 1px 7px;
+  margin: 0 -6px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 21px;
+  font-weight: 400;
+}
+.wordSources {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.wordSources a, .wordSources .textLink {
+  display: block;
+  margin: 7px 0;
+}
+.vocabularyComposer {
+  position: sticky;
+  top: 100px;
+  background: #eaf0e3;
+  border: 1px solid #d2ddc9;
+  border-radius: 12px;
+  padding: 27px;
+}
+.vocabularyComposer h2 {
+  font:
+    30px/1.15 Georgia,
+    serif;
+  letter-spacing: -0.7px;
+  margin: 12px 0;
+  color: var(--ink);
+}
+.vocabularyComposer > p {
+  font-size: 14px;
+  color: #52654f;
+  margin: 0 0 20px;
+}
+.chosenWords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 20px 0;
+  min-height: 46px;
+  align-content: center;
+}
+.chosenWords > span {
+  color: #65765d;
+  font-size: 13px;
+}
+.chosenWords button {
+  border-color: #bbcbb0;
+  background: #fcfdf6;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 20px;
+  padding: 5px 10px;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.chosenWords button span {
+  margin-left: 6px;
+  color: #6c7c62;
+}
+.vocabularyComposer form {
+  display: grid;
+  gap: 16px;
+}
+.vocabularyComposer label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.vocabularyComposer label > span {
+  float: right;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.vocabularyComposer label input {
+  display: block;
+  margin-top: 7px;
+  font-weight: 400;
+}
+.lengthPresets {
+  display: flex;
+  gap: 8px;
+  margin-top: -8px;
+}
+.lengthPresets button {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+}
+.lengthPresets button.on {
+  background: #d4e2c9;
+  border-color: #829c74;
+}
+.vocabularyComposer form > .primary {
+  margin-top: 4px;
+  padding: 12px 15px;
+}
+.vocabularyModel {
+  display: block;
+  margin-top: 14px;
+  text-align: center;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.vocabularyComposer p.vocabularyConnection,
+.vocabularyComposer p[role='status'] {
+  margin: 16px 0 0;
+  font-size: 12px;
+}
+.vocabularyEmpty {
+  padding: 46px 32px;
+  text-align: center;
+  color: var(--muted);
+}
+.vocabularyEmpty > span {
+  display: block;
+  font:
+    42px Georgia,
+    serif;
+  color: #738a60;
+  margin-bottom: 20px;
+}
+.vocabularyEmpty h2 {
+  font:
+    30px Georgia,
+    serif;
+  color: var(--ink);
+  margin: 10px 0;
+}
+.vocabularyEmpty p {
+  font-size: 14px;
+  max-width: 380px;
+  margin: 12px auto;
+}
+.vocabularyEmpty a {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 13px;
+}
+.vocabularyNoMatch {
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+.vocabularyNotice {
+  color: var(--green);
+  font-size: 13px;
+}
+.vocabularyReading {
+  display: grid;
+  grid-template-columns: 245px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.savedTexts {
+  display: grid;
+  gap: 7px;
+  max-height: 75vh;
+  overflow: auto;
+  position: sticky;
+  top: 100px;
+}
+.savedTexts button {
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 15px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.savedTexts button.on {
+  background: #e8efdf;
+  border-color: #c7d6bd;
+}
+.savedTexts strong {
+  display: block;
+  font:
+    20px/1.25 Georgia,
+    serif;
+}
+.savedTexts small {
+  display: block;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.vocabularyArticle {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 32px 40px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.vocabularyArticleMeta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.vocabularyArticleMeta .textLink {
+  font-size: 12px;
+}
+.vocabularyArticle h2 {
+  font:
+    36px/1.15 Georgia,
+    serif;
+  letter-spacing: -0.8px;
+  margin: 25px 0 10px;
+  color: var(--ink);
+  scroll-margin-top: 110px;
+}
+.vocabularyArticleTopic {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 27px;
+}
+.vocabularyProse {
+  font:
+    19px/1.85 Georgia,
+    serif;
+}
+.vocabularyProse p {
+  white-space: pre-line;
+  margin: 0 0 22px;
+}
+.usedWords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  margin-top: 30px;
+  padding-top: 20px;
+}
+.usedWords span {
+  font-size: 12px;
+  color: var(--muted);
+  background: #f0f3e9;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+.wordCapture {
+  position: fixed;
+  z-index: 50;
+  width: min(288px, calc(100vw - 24px));
+  background: var(--paper);
+  border: 1px solid #bac9b1;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px #203e3226;
+  padding: 12px;
+}
+.wordCaptureTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.wordCaptureTop strong {
+  font:
+    21px/1.25 Georgia,
+    serif;
+  overflow-wrap: anywhere;
+}
+.wordCaptureTop button {
+  padding: 0 6px;
+  font-size: 20px;
+  border: 0;
+  background: transparent;
+}
+.wordCapture > button {
+  width: 100%;
+  font-size: 13px;
+  padding: 8px;
+}
+.wordCapture > span {
+  display: block;
+  color: var(--green);
+  font-size: 13px;
+}
+.wordCapture > small {
+  display: block;
+  margin-top: 8px;
+  color: #8e3c30;
+}
+.wordCaptureHint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 20px;
+}
+@media (max-width: 1000px) {
+  .headerIn {
+    gap: 28px;
+  }
+  .local {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  html {
+    scroll-padding-top: 130px;
+  }
+  .headerIn {
+    gap: 0;
+    padding-top: 10px;
+  }
+  .headerIn nav {
+    width: 100%;
+    justify-content: space-between;
+    gap: 14px;
+  }
+  .headerIn nav a {
+    padding: 10px 0 12px;
+  }
+  .homeMain {
+    padding-top: 24px;
+  }
+  .vocabularyLayout,
+  .vocabularyReading {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+  .vocabularyComposer,
+  .savedTexts {
+    position: static;
+  }
+  .vocabularyComposer {
+    padding: 24px;
+  }
+  .wordCollectionTools,
+  .wordList > li {
+    padding: 16px;
+  }
+  .vocabularyArticle {
+    padding: 24px;
+  }
+  .vocabularyArticle h2 {
+    font-size: 30px;
+    scroll-margin-top: 140px;
+  }
+  .savedTexts {
+    display: flex;
+    overflow-x: auto;
+    max-height: none;
+    padding-bottom: 6px;
+  }
+  .savedTexts button {
+    flex: 0 0 215px;
+  }
+  .vocabularyEmpty {
+    padding: 30px 22px;
+  }
+  .wordSelectionBar {
+    padding: 12px 16px;
+    gap: 10px;
+  }
+}
+.componentUpdates { list-style: none; padding: 0; max-width: 34rem; }
+.componentUpdates li { display: flex; justify-content: space-between; gap: 1em; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+.componentUpdates label { display: inline-flex; align-items: center; gap: .65em; cursor: pointer; }
+.componentUpdates input { width: 1rem; height: 1rem; accent-color: var(--green); }
+.updatesPanel progress { width: min(100%, 34rem); accent-color: var(--green); }

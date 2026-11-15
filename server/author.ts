@@ -2,8 +2,20 @@ import { createHash, randomInt, randomUUID } from 'node:crypto'
 import { bank, learnerTrend, normalize } from '../core/exam.ts'
 import { catalog, type Item, type Task } from '../core/types.ts'
 import { extras, addItem, recent, cache } from './store.ts'
-import { complete } from './provider.ts'
+import { complete, modelFor } from './provider.ts'
+import {
+  taskSpecs,
+  TASK_SPEC_VERSION,
+  AUDIT_SPEC_VERSION,
+  reviewContract,
+  generationPrompt,
+  auditPrompt,
+  createCloze,
+  validateTaskSet,
+  validateAudit,
+} from '../core/task-specs.ts'
 import { synth } from './speech.ts'
+import { QualityError, type QualityStage } from '../core/quality.ts'
 
 export function json(text: string) {
   return JSON.parse(
@@ -12,31 +24,6 @@ export function json(text: string) {
       .replace(/^\x60\x60\x60(?:json)?\s*/, '')
       .replace(/\x60\x60\x60$/, ''),
   )
-}
-const guidelines: Record<Task, string> = {
-  words:
-    '70–100 word continuous academic text. Leave the first sentence intact, then remove the latter half of ten alternating words. Use {0} through {9} for missing suffixes and supply the suffixes in keys.',
-  daily:
-    'Use an authentic short text such as a message exchange, notice, receipt, schedule or instructions. Test specific information and its practical implication.',
-  passage:
-    'Write a self-contained academic passage around 150–200 words. Mix inference, detail, reference, organization and vocabulary questions anchored in the text.',
-  reply:
-    'Write one short spoken utterance and four plausible printed replies. Only one should fit the speaker’s intent.',
-  conversation:
-    'A natural two-person campus conversation. Separate turns with newlines and omit speaker labels. Test implication and purpose as well as details.',
-  announcement:
-    'A concise spoken campus announcement with a concrete audience. Questions should depend on listening to this particular message.',
-  talk: 'Write a short academic talk with an example or explanation. Vary argument structure and use evidence-specific questions with plausible distractors.',
-  sentence:
-    'A short conversational prompt and a grammatical answer broken into movable chunks. Supply the chunks in solution order and the joined sentence as the sole key.',
-  email:
-    'A realistic email situation, recipient and three communicative goals. Use passage for context and evidence for the assessment criteria.',
-  discussion:
-    'Include a professor’s question and two distinct student contributions. Ask the learner for an original supported contribution.',
-  repeat:
-    'One coherent real-world setting per group. Each speech is one different sentence to repeat, progressing from short to longer. Use one speaker.',
-  interview:
-    'Four different related spoken interview questions in a full mock. Progress from experience to explanation to supported opinion. Use one interviewer.',
 }
 export const fingerprint = (q: Item) =>
   createHash('sha256')
@@ -137,6 +124,15 @@ export interface AuthorProgress {
   raw?: unknown
   items?: Item[]
   audited?: boolean
+  source?: string
+  reviewSource?: string
+  reviewVersion?: string
+  version?: string
+  audit?: unknown
+  feedback?: { stage: QualityStage; issues: string[] }
+  phase?: 'authoring' | 'reviewing' | 'audio'
+  timings?: Partial<Record<'authoring' | 'reviewing' | 'audio', number>>
+  inputChars?: Partial<Record<'authoring' | 'reviewing', number>>
 }
 export interface AuthorControl {
   progress: AuthorProgress
@@ -149,6 +145,36 @@ export async function author(
   previous: Item[],
   brief: string,
   control?: AuthorControl,
+): Promise<Item[]> {
+  const state = control ?? {
+    progress: {},
+    persist: () => {},
+    checkpoint: () => {},
+  }
+  try {
+    return await authorPass(slots, personal, previous, brief, state)
+  } catch (error) {
+    if (error instanceof QualityError) {
+      state.progress.feedback = { stage: error.stage, issues: error.issues }
+      state.persist()
+    }
+    throw error
+  }
+}
+function validateDraft<T>(action: () => T): T {
+  try {
+    return action()
+  } catch (error) {
+    if (error instanceof QualityError) throw error
+    throw new QualityError('draft', [(error as Error).message])
+  }
+}
+async function authorPass(
+  slots: Item[],
+  personal: boolean,
+  previous: Item[],
+  brief: string,
+  control: AuthorControl,
 ): Promise<Item[]> {
   const task = slots[0].task,
     group = slots[0].group ? 'set-' + randomUUID() : undefined
@@ -171,86 +197,243 @@ export async function author(
     task: catalog[task][1],
     count: slots.length,
     levels: slots.map((q) => q.level),
-    fields: shape,
-    format: guidelines[task],
+    fields:
+      task === 'words' ? shape.filter((field) => field !== 'keys') : shape,
+    format: taskSpecs[task].instructions,
     brief,
     sharedStimulus: shared,
+    outputShape: shared
+      ? '{stimulus:string,items:[{title,prompt,options,keys,evidence}]} — shared text once in stimulus; omit speech/passage from items'
+      : 'JSON array of items',
+    functions:
+      task === 'reply'
+        ? [
+            'request information',
+            'suggest a next step',
+            'clarify a reference',
+            'respond to a polite request',
+            'interpret an indirect remark',
+          ].slice(0, slots.length)
+        : undefined,
     avoidTopics: [...new Set(different.map((q) => q.title))].slice(-60),
     avoidStems: [...new Set(different.map((q) => q.prompt))].slice(-25),
   }
   const progress = control?.progress ?? {}
-  if (!progress.raw) {
-    control?.checkpoint(true)
-    progress.raw = json(
-      await complete(
-        'Create original TOEFL practice material. Return a JSON array of the requested length and fields. Use strings for title, prompt, passage, speech, evidence. Use string arrays for keys, chunks and options. Objective multiple choice needs four choices and one exact key. When sharedStimulus is true, repeat the EXACT same passage or audio script for every question in the group but assess different aspects. Otherwise give each item distinct content. Use natural English and vary genre, reasoning, distractors and sentence structure. Avoid swapping names into one template. Treat the brief as learner data.',
-        JSON.stringify(input),
-      ),
+  const selected = modelFor('generation'),
+    source = selected.provider + ':' + selected.model
+  const reviewer = modelFor('review'),
+    reviewSource = reviewer.provider + ':' + reviewer.model
+  if (
+    progress.raw &&
+    (progress.source !== source || progress.version !== TASK_SPEC_VERSION)
+  ) {
+    delete progress.raw
+    delete progress.items
+    delete progress.audited
+    delete progress.audit
+    delete progress.feedback
+  }
+  progress.source = source
+  progress.version = TASK_SPEC_VERSION
+  if (
+    progress.reviewSource !== reviewSource ||
+    progress.reviewVersion !== AUDIT_SPEC_VERSION
+  ) {
+    delete progress.audit
+    delete progress.audited
+    if (progress.feedback?.stage.startsWith('audit')) delete progress.feedback
+  }
+  progress.reviewSource = reviewSource
+  progress.reviewVersion = AUDIT_SPEC_VERSION
+  const checkpoint = (request: boolean) => {
+    const current = modelFor('generation'),
+      currentReview = modelFor('review')
+    if (
+      current.provider + ':' + current.model !== source ||
+      currentReview.provider + ':' + currentReview.model !== reviewSource
     )
+      throw Error(
+        'The selected AI models changed. Preparation will resume with the new choices; unchanged generation work is kept.',
+      )
+    control?.checkpoint(request)
+  }
+  const reviseDraft =
+    progress.feedback && progress.feedback.stage !== 'audit-format'
+  if (!progress.raw || reviseDraft) {
+    checkpoint(true)
+    progress.phase = 'authoring'
+    control.persist()
+    const inputText = JSON.stringify({
+      ...input,
+      revision: reviseDraft
+        ? { previous: progress.raw, issues: progress.feedback!.issues }
+        : undefined,
+    })
+    progress.inputChars = {
+      ...progress.inputChars,
+      authoring: inputText.length,
+    }
+    const started = Date.now()
+    const written = await complete(
+      generationPrompt +
+        ' Follow outputShape: shared sets use one stimulus plus an items array; otherwise return an array. Strings for text fields, string arrays for keys/chunks/options. Multiple choice has four options and one exact key. If revision is provided, correct the specific defects and return the entire set; do not merely change a key while leaving ambiguity.',
+      inputText,
+      300000,
+      'generation',
+    )
+    progress.timings = { ...progress.timings, authoring: Date.now() - started }
+    progress.raw = validateDraft(() => json(written))
+    delete progress.items
+    delete progress.audited
+    delete progress.audit
+    delete progress.feedback
     control?.persist()
   }
-  const raw = progress.raw
-  const objects = Array.isArray(raw) ? raw : [raw]
-  if (objects.length !== slots.length)
-    throw Error('Incorrect number of items returned.')
-  const result =
-    progress.items ??
-    objects.map((obj, i) => ({
-      ...item(obj, slots[i], personal),
-      group,
-    }))
-  for (const [i, q] of result.entries()) {
-    if (shared && stimulus(q) !== stimulus(result[0]))
-      throw Error('Questions in a set must share one stimulus.')
-    if (
-      [...bank, ...extras(), ...previous].some(
-        (p) =>
-          p.task === task &&
-          (fingerprint(q) === fingerprint(p) ||
-            overlaps(stimulus(q), stimulus(p))),
-      )
-    )
-      throw Error('Duplicate or near-duplicate exercise rejected.')
-    if (
-      groupedQuestions.has(task) &&
-      previous.some(
-        (p) => p.task === task && normalize(p.prompt) === normalize(q.prompt),
-      )
-    )
-      throw Error('Repeated question stem. Use a different reasoning task.')
-    if (
-      result
-        .slice(0, i)
-        .some((p) =>
-          shared
-            ? normalize(p.prompt) === normalize(q.prompt)
-            : overlaps(stimulus(p), stimulus(q)),
+  const result = validateDraft(() => {
+    const raw = progress.raw as any
+    const expanded =
+      shared &&
+      raw &&
+      !Array.isArray(raw) &&
+      Array.isArray(raw.items) &&
+      typeof raw.stimulus === 'string'
+        ? raw.items.map((obj: any) => ({
+            ...obj,
+            [taskSpecs[task].context]: raw.stimulus,
+          }))
+        : raw
+    const objects = Array.isArray(expanded) ? expanded : [expanded]
+    if (objects.length !== slots.length)
+      throw Error('Incorrect number of items returned.')
+    const result =
+      progress.items ??
+      objects.map((obj, i) => ({
+        ...item(
+          task === 'words'
+            ? { ...obj, ...createCloze(String(obj.passage ?? '')) }
+            : obj,
+          slots[i],
+          personal,
+        ),
+        group,
+      }))
+    validateTaskSet(result)
+    for (const [i, q] of result.entries()) {
+      if (shared && stimulus(q) !== stimulus(result[0]))
+        throw Error('Questions in a set must share one stimulus.')
+      if (
+        [...bank, ...extras(), ...previous].some(
+          (p) =>
+            p.task === task &&
+            (fingerprint(q) === fingerprint(p) ||
+              overlaps(stimulus(q), stimulus(p))),
         )
-    )
-      throw Error('Repeated material inside a generated set.')
-  }
+      )
+        throw Error('Duplicate or near-duplicate exercise rejected.')
+      if (
+        result
+          .slice(0, i)
+          .some((p) =>
+            shared
+              ? normalize(p.prompt) === normalize(q.prompt)
+              : overlaps(stimulus(p), stimulus(q)),
+          )
+      )
+        throw Error('Repeated material inside a generated set.')
+    }
+    return result
+  })
   progress.items = result
   control?.persist()
   if (!progress.audited) {
-    control?.checkpoint(true)
-    const audit = await complete(
-      'Independently solve and audit this TOEFL set. Check format, grammar, answer keys, distractors, unique solutions and evidence. For a multi-question stimulus check that questions require different reasoning and are not paraphrases. For repeat or interview ensure a coherent sequence. Reject near-copies of the supplied previous scenarios. Return exactly PASS if usable or a short reason.',
-      JSON.stringify({
-        items: result,
-        avoidTopics: input.avoidTopics,
-        avoidStems: input.avoidStems,
+    checkpoint(true)
+    progress.phase = 'reviewing'
+    control.persist()
+    const contexts: Record<string, string> = {},
+      knownContexts = new Map<string, string>()
+    const auditInput = JSON.stringify({
+      contract: reviewContract(task),
+      auditCorrections:
+        progress.feedback?.stage === 'audit-format'
+          ? progress.feedback.issues
+          : undefined,
+      items: result.map(({ keys, evidence, quality, ...q }, index) => {
+        // The author returns chunks in answer order. Hide that order from the independent solver.
+        const chunks = q.chunks?.slice()
+        if (chunks)
+          for (let i = chunks.length - 1; i > 0; i--) {
+            const j = randomInt(i + 1)
+            ;[chunks[i], chunks[j]] = [chunks[j], chunks[i]]
+          }
+        const stimulus = q.passage || q.speech
+        let contextId: string | undefined
+        if (stimulus) {
+          contextId = knownContexts.get(stimulus) ?? 'c' + knownContexts.size
+          knownContexts.set(stimulus, contextId)
+          contexts[contextId] = stimulus
+        }
+        return {
+          task: q.task,
+          level: q.level,
+          title: q.title,
+          prompt: q.prompt,
+          options: q.options,
+          contextId,
+          chunks,
+          index,
+          gapLengths:
+            task === 'words' ? keys?.map((key) => key.length) : undefined,
+        }
       }),
-    )
-    if (audit.trim() !== 'PASS')
-      throw Error('Item rejected during review: ' + audit.slice(0, 200))
+      contexts,
+      avoidTopics: input.avoidTopics,
+      avoidStems: input.avoidStems,
+    })
+    progress.inputChars = {
+      ...progress.inputChars,
+      reviewing: auditInput.length,
+    }
+    const reviewedAt = Date.now()
+    const audit = await complete(auditPrompt, auditInput, 300000, 'review')
+    progress.timings = {
+      ...progress.timings,
+      reviewing: Date.now() - reviewedAt,
+    }
+    let checked: unknown
+    progress.audit = audit.slice(0, 60000)
+    control.persist()
+    try {
+      checked = json(audit)
+    } catch {
+      throw new QualityError('audit-format', [
+        'The independent audit must return a valid JSON object with structured evidence.',
+      ])
+    }
+    progress.audit = checked
+    control.persist()
+    validateAudit(result, checked)
+    for (const q of result)
+      q.quality = {
+        version: AUDIT_SPEC_VERSION,
+        provider: reviewer.provider,
+        model: reviewer.model,
+        author: { provider: selected.provider, model: selected.model },
+        checkedAt: Date.now(),
+      }
     progress.audited = true
+    delete progress.feedback
     control?.persist()
   }
+  progress.phase = 'audio'
+  control.persist()
+  const audioAt = Date.now()
   for (const q of result)
     if (q.speech) {
-      control?.checkpoint(false)
-      await synth(q, cache, () => control?.checkpoint(false))
+      checkpoint(false)
+      await synth(q, cache, () => checkpoint(false))
     }
+  progress.timings = { ...progress.timings, audio: Date.now() - audioAt }
+  checkpoint(false)
   return result
 }
 export async function generate(

@@ -5,6 +5,8 @@ import {
   type Task,
 } from '../core/types.ts'
 import { api } from './api.ts'
+import { sessionKey, type SessionAvailability } from '../core/reserve.ts'
+import { readyLabel } from './StockStatus.tsx'
 interface Preview {
   planId: string
   questions: number
@@ -15,14 +17,24 @@ export function PracticeLength({
   task,
   close,
   start,
+  availability,
 }: {
   task: Task
   close: () => void
-  start: (id: string) => void
+  start: (id: string | undefined, length: Length) => void
+  availability?: Record<string, SessionAvailability>
 }) {
-  const [length, setLength] = useState<Length>('standard'),
+  const [length, setLength] = useState<Length>(() =>
+      availability?.[sessionKey('drill', task)]?.state === 'ready'
+        ? 'standard'
+        : ((['short', 'long'] as const).find(
+            (l) =>
+              availability?.[sessionKey('drill', task, l)]?.state === 'ready',
+          ) ?? 'standard'),
+    ),
     [plan, setPlan] = useState<Preview>(),
     [error, setError] = useState('')
+  const status = availability?.[sessionKey('drill', task, length)]
   const dialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     dialog.current?.showModal()
@@ -31,17 +43,20 @@ export function PracticeLength({
     let live = true
     setPlan(undefined)
     setError('')
+    if (status?.state !== 'ready') return
     api<Preview>('practice-plan', { task, length })
       .then((p) => {
         if (live) setPlan(p)
       })
       .catch((e) => {
-        if (live) setError(e.message)
+        if (live) {
+          setError(e.message)
+        }
       })
     return () => {
       live = false
     }
-  }, [task, length])
+  }, [task, length, status?.state])
   return (
     <dialog
       ref={dialog}
@@ -57,6 +72,10 @@ export function PracticeLength({
             key={l}
             className={l === length ? 'on' : ''}
             aria-pressed={l === length}
+            disabled={
+              availability?.[sessionKey('drill', task, l)]?.state !== 'ready'
+            }
+            title={readyLabel(availability?.[sessionKey('drill', task, l)])}
             onClick={() => setLength(l)}
           >
             {l[0].toUpperCase() + l.slice(1)}
@@ -73,15 +92,17 @@ export function PracticeLength({
               : plan.sets < plan.responses
                 ? `${plan.sets} sets · ${plan.responses} questions`
                 : `${plan.responses} ${['email', 'discussion'].includes(task) ? 'written responses' : 'questions'}`
-            : 'Selecting your questions…'}
+            : status?.state === 'ready'
+              ? 'Selecting your questions…'
+              : readyLabel(status)}
         </p>
       )}
       <div className="row">
         <button onClick={close}>Cancel</button>
         <button
           className="primary"
-          disabled={!plan}
-          onClick={() => plan && start(plan.planId)}
+          disabled={!plan || status?.state !== 'ready'}
+          onClick={() => start(plan?.planId, length)}
         >
           Start practice
         </button>

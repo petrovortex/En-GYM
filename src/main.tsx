@@ -7,6 +7,7 @@ import {
   type Mode,
   type Section,
   type HistoryRow,
+  type PracticeLength as Length,
 } from '../core/types.ts'
 import { api, isLive, date, type Session } from './api.ts'
 import { Mark } from './Art.tsx'
@@ -14,7 +15,10 @@ import { Exam } from './Exam.tsx'
 import { Settings } from './Settings.tsx'
 import { Notebook } from './Notebook.tsx'
 import { Review } from './Review.tsx'
+import { Vocabulary } from './Vocabulary.tsx'
 import { PracticeLength } from './PracticeLength.tsx'
+import { useStock, readyLabel, drillLabel } from './StockStatus.tsx'
+import { sessionKey } from '../core/reserve.ts'
 import './style.css'
 const icons: Record<Section, string> = {
   Reading: 'Aa',
@@ -33,11 +37,28 @@ function App() {
     [error, setError] = useState(''),
     [filter, setFilter] = useState('All')
   const [drillTask, setDrillTask] = useState<Task>()
-  const liveExam = page.startsWith('attempt/') && !!session && isLive(session)
-  useEffect(() => {
-    void api('activity', { active: liveExam, client: activityClient }).catch(
-      () => {},
+  const liveExam =
+    page.startsWith('attempt/') && !!session && isLive(session)
+  const [stock, setStock] = useStock(!liveExam, page)
+  const available = (
+    mode: Mode,
+    focus: string,
+    length: Length = 'standard',
+  ) => stock?.sessions[sessionKey(mode, focus, length)]
+  const canStart = (
+    mode: Mode,
+    focus: string,
+    length: Length = 'standard',
+  ) => available(mode, focus, length)?.state === 'ready'
+  const canDrill = (task: string) =>
+    (['short', 'standard', 'long'] as const).some((length) =>
+      canStart('drill', task, length),
     )
+  useEffect(() => {
+    void api('activity', {
+      active: liveExam,
+      client: activityClient,
+    }).catch(() => {})
     if (!liveExam) return
     const timer = setInterval(() => {
       void api('activity', { active: true, client: activityClient }).catch(
@@ -76,10 +97,20 @@ function App() {
     mode: Mode,
     focus: string,
     retry?: { id: string; item: string },
-    options?: { followUp?: string; planId?: string },
+    options?: {
+      followUp?: string
+      planId?: string
+      length?: Length
+    },
   ) {
     if (busy) return
-    if (mode === 'drill' && !retry && !options?.followUp && !options?.planId) {
+    if (
+      mode === 'drill' &&
+      !retry &&
+      !options?.followUp &&
+      !options?.planId &&
+      !options?.length
+    ) {
       setDrillTask(focus as Task)
       return
     }
@@ -87,7 +118,12 @@ function App() {
     setBusy(true)
     setError('')
     try {
-      const s = await api<Session>('start', { mode, focus, retry, ...options })
+      const s = await api<Session>('start', {
+        mode,
+        focus,
+        retry,
+        ...options,
+      })
       setSession(s)
       location.hash = 'attempt/' + s.id
     } catch (e) {
@@ -106,7 +142,9 @@ function App() {
           {r.mode === 'full' ? '▤' : r.mode === 'section' ? '▥' : '◇'}
         </span>
         <div>
-          <b>{r.mode === 'drill' ? catalog[r.focus as Task]?.[1] : r.focus}</b>
+          <b>
+            {r.mode === 'drill' ? catalog[r.focus as Task]?.[1] : r.focus}
+          </b>
           <small>
             {date(r.started)} ·{' '}
             {r.mode === 'drill'
@@ -131,23 +169,25 @@ function App() {
   )
     return (
       <Exam
-        key={session.id + '-' + session.item.id + '-' + !!session.itemStarted}
+        key={
+          session.id + '-' + session.item.id + '-' + !!session.itemStarted
+        }
         s={session}
         update={setSession}
       />
     )
   return (
     <>
-      <header>
+      <header className="appHeader">
         <div className="headerIn">
           <a className="brand" href="#desk">
             <Mark />
-            TOEFL Trainer
+            En-GYM
           </a>
           <nav>
             {[
-              ['desk', 'Practice desk'],
               ['practice', 'Practice'],
+              ['vocabulary', 'Vocabulary'],
               ['history', 'History'],
               ['settings', 'Settings'],
             ].map(([id, name]) => (
@@ -165,13 +205,14 @@ function App() {
           </span>
         </div>
       </header>
-      <main>
+      <main className={page === 'desk' ? 'homeMain' : undefined}>
         {drillTask && (
           <PracticeLength
             task={drillTask}
+            availability={stock?.sessions}
             close={() => setDrillTask(undefined)}
-            start={(planId) =>
-              void start('drill', drillTask, undefined, { planId })
+            start={(planId, length) =>
+              void start('drill', drillTask, undefined, { planId, length })
             }
           />
         )}
@@ -182,24 +223,22 @@ function App() {
         )}
         {busy && (
           <div className="notice" role="status">
-            Preparing your questions and audio. New listening prompts take
-            longer the first time.
+            Opening your session…
           </div>
         )}
         {page === 'desk' && (
           <>
-            <div className="pagehead">
-              <h1>Practice desk</h1>
-            </div>
             <section className="hero">
               <div>
-                <h2>Full-length mock test</h2>
+                <h1>Full-length mock test</h1>
                 <p>
-                  Reading, Listening, Writing, and Speaking in one timed test.
+                  Reading, Listening, Writing, and Speaking in one timed
+                  test.
                 </p>
+                <small>{readyLabel(available('full', 'Full mock'))}</small>
               </div>
               <button
-                disabled={busy}
+                disabled={busy || !canStart('full', 'Full mock')}
                 onClick={() => start('full', 'Full mock')}
               >
                 Start a full mock <span aria-hidden="true">→</span>
@@ -224,7 +263,10 @@ function App() {
                   <span className="skillIcon">{icons[s]}</span>
                   <span className="skillName">{s}</span>
                   <small>
-                    {Object.values(catalog).filter(([sec]) => sec === s).length}{' '}
+                    {
+                      Object.values(catalog).filter(([sec]) => sec === s)
+                        .length
+                    }{' '}
                     exercise types <b>↗</b>
                   </small>
                 </button>
@@ -242,11 +284,11 @@ function App() {
               <div className="empty">
                 <strong>Your first attempt will appear here.</strong>
                 <p>
-                  Start with a short speaking exercise to check your microphone
-                  and hear your response.
+                  Start with a short speaking exercise to check your
+                  microphone and hear your response.
                 </p>
                 <button
-                  disabled={busy}
+                  disabled={busy || !canDrill('repeat')}
                   onClick={() => start('drill', 'repeat')}
                 >
                   Try Listen and Repeat →
@@ -263,7 +305,8 @@ function App() {
                 Practice a skill<span className="gold">.</span>
               </h1>
               <p>
-                Work through a section or spend a few minutes on one exercise.
+                Work through a section or spend a few minutes on one
+                exercise.
               </p>
             </div>
             <div className="tabs">
@@ -282,13 +325,14 @@ function App() {
                 <span className="eyebrow">TIMED SECTION</span>
                 <h2>{choice} mock</h2>
                 <p>
-                  Practice the complete section with material selected for your
-                  level.
+                  Practice the complete section with material selected for
+                  your level.
                 </p>
+                <small>{readyLabel(available('section', choice))}</small>
               </div>
               <button
                 className="primary"
-                disabled={busy}
+                disabled={busy || !canStart('section', choice)}
                 onClick={() => start('section', choice)}
               >
                 Start section →
@@ -302,13 +346,13 @@ function App() {
                 .filter(([, v]) => v[0] === choice)
                 .map(([t, [, name]], i) => (
                   <button
-                    disabled={busy}
+                    disabled={busy || !canDrill(t)}
                     key={t}
                     onClick={() => start('drill', t)}
                   >
                     <span className="num">0{i + 1}</span>
                     <b>{name}</b>
-                    <small>Focused drill</small>
+                    <small>{drillLabel(t, stock?.sessions)}</small>
                     <span>→</span>
                   </button>
                 ))}
@@ -357,7 +401,13 @@ function App() {
             )}
           </>
         )}
-        {page === 'settings' && <Settings />}
+        {page === 'vocabulary' && <Vocabulary />}
+        {page === 'settings' && (
+          <Settings
+            stock={stock}
+            onBankChange={(bank) => setStock((s) => s && { ...s, bank })}
+          />
+        )}
         {page === 'history' && <Notebook />}
         {page.startsWith('attempt/') &&
           (session?.id === attemptId && !isLive(session) ? (
@@ -375,7 +425,7 @@ function App() {
           ))}
       </main>
       <footer>
-        <span>TOEFL Trainer</span>
+        <span>En-GYM</span>
         <span>Independent practice · 2026 iBT format</span>
       </footer>
     </>

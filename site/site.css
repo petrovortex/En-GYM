@@ -1,0 +1,53 @@
+:root { color-scheme: light; --paper:#f8f8f2; --ink:#172e25; --green:#174c3d; --line:#ced5c7; --muted:#465b50; --serif:Georgia,"Times New Roman",serif; font:16px/1.55 "Segoe UI",Arial,sans-serif; color:var(--ink); background:var(--paper); }
+* {box-sizing:border-box}
+body {margin:0}
+a {color:inherit;text-underline-offset:4px}
+a:focus-visible {outline:3px solid #659744;outline-offset:5px}
+.mast,main,footer {width:min(1240px,90%);margin-inline:auto}
+.mast {display:flex;align-items:center;justify-content:space-between;padding:24px 0;border-bottom:1px solid var(--line);gap:20px}
+.mast nav,footer div {display:flex;align-items:center;gap:clamp(14px,3vw,42px)}
+.brand {display:inline-flex;align-items:center;gap:11px;font:600 26px/1 var(--serif);letter-spacing:-.06em;text-decoration:none;white-space:nowrap}
+.mast nav a,footer a {font-weight:550;font-size:14px;text-decoration:none}
+.mast nav a:hover,footer a:hover,.scenarios a:hover h3 {text-decoration:underline}
+.mast .github {border:1px solid #9caea1;border-radius:24px;padding:8px 15px}
+.intro {display:grid;grid-template-columns: .95fr 1.05fr;gap:clamp(26px,4vw,64px);align-items:center;padding:clamp(45px,6.5vw,100px) 0}
+h1,h2,h3,p,figure {margin:0}
+h1,h2,h3 {font-family:var(--serif);font-weight:400;text-wrap:balance}
+.pitch h1,.guide h1 {font-size:clamp(45px,5.45vw,82px);line-height:1.035;letter-spacing:-.062em}
+.pitch em {color:var(--green);font-weight:400}
+.pitch sup {font:normal .3em/1 Arial,sans-serif;letter-spacing:0;vertical-align:super}
+.pitch>p {max-width:48ch;margin:24px 0;color:var(--muted);font-size:clamp(16px,1.25vw,19px)}
+.download {display:inline-flex;align-items:center;gap:14px;padding:13px 22px;border-radius:7px;background:var(--green);color:white;font-weight:600;text-decoration:none}
+.download:hover {background:#0d382c}
+.download span {font-size:23px;line-height:1}
+.pitch small {display:block;margin-top:13px;color:var(--muted);font-size:13px}
+.hero-shot {padding:clamp(20px,3.3vw,46px) clamp(18px,3.3vw,48px) 16px;background:#d9e7d3;border-radius:14px}
+.shot-frame {overflow:hidden;border:1px solid #aec4a9;border-radius:8px;background:#fff;box-shadow:0 14px 32px -15px #28473880}
+.hero-shot img,.scenarios img {display:block;width:100%;height:auto}
+.hero-shot figcaption {display:flex;justify-content:space-between;gap:14px;padding-top:13px;color:#3c5645;font-size:12px}
+.practice {border-top:1px solid var(--line);padding:clamp(34px,5vw,72px) 0}
+.practice h2,.local h2,.chapters h2 {font-size:clamp(30px,3.3vw,47px);letter-spacing:-.045em;line-height:1.13}
+.scenarios {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(16px,2.4vw,36px);margin-top:29px}
+.scenarios a {text-decoration:none}
+.scenarios img {border-radius:8px;border:1px solid var(--line);aspect-ratio:12/7;object-fit:cover;object-position:top}
+.scenarios h3 {font-size:clamp(24px,2.25vw,32px);letter-spacing:-.045em;line-height:1.2;margin:17px 0 8px}
+.scenarios h3 span {color:#6a806a;font:16px sans-serif}
+.scenarios p,.local p,.chapters p,.chapters ol {color:var(--muted)}
+.local {border-block:1px solid var(--line);display:grid;grid-template-columns:1fr 1.5fr;gap:30px;padding:clamp(28px,4vw,60px) 0}
+.local a {display:inline-block;margin-top:15px;font-weight:600}
+footer {padding:30px 0 45px}
+footer div {justify-content:space-between;flex-wrap:wrap}
+footer small {display:block;margin-top:15px;color:var(--muted);font-size:12px}
+.guide {padding:54px 0 70px;border-bottom:1px solid var(--line)}
+.guide-grid {margin-top:38px;display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,3fr);gap:40px}
+.guide-grid nav {align-self:start;position:sticky;top:24px;display:grid;gap:10px}
+.chapters {max-width:48rem}
+.chapters section {border-top:1px solid var(--line);padding:24px 0;scroll-margin-top:16px}
+.chapters h2 {font-size:32px}
+.chapters p,.chapters ol {margin:14px 0 0}
+.chapters li {padding-bottom:8px}
+.chapters details {margin-top:1em}
+.chapters summary {cursor:pointer}
+.chapters code {overflow-wrap:anywhere}
+@media(max-width:790px){.intro{grid-template-columns:1fr}.pitch>p{max-width:52ch}.hero-shot{max-width:590px}.scenarios{grid-template-columns:1fr}.scenarios article{max-width:560px}.scenarios img{max-height:240px}.local{grid-template-columns:1fr;gap:14px}.guide-grid{grid-template-columns:1fr;gap:24px}.guide-grid nav{position:static;grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.mast,main,footer{width:91%}.mast{gap:8px;padding:16px 0}.brand{font-size:22px;gap:7px}.brand img{width:29px;height:29px}.mast nav{gap:12px}.mast nav a{font-size:12px}.mast .github{padding:5px 8px}.intro{padding-top:40px}.hero-shot figcaption{font-size:11px}}
