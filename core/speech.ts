@@ -1,3 +1,13 @@
+import type { Item } from './types.ts'
+
+export function liveSpeakingItem(item: Item): Item {
+  if (item.task !== 'repeat') return item
+  return {
+    id: item.id, task: item.task, level: item.level,
+    title: 'Listen and Repeat', prompt: 'Listen, then repeat what you hear.',
+  }
+}
+
 // Preserve this salt for installed cache slots so a voice update can replace
 // a checked recording atomically and leave the previous one playable until then.
 export const ORIGINAL_PROMPT_PACK =

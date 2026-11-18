@@ -34,7 +34,7 @@ export async function checkSpeakingHandoff(browser, origin) {
     const view = () => ({
       id: 'handoff', mode, section: 'Speaking', count: 4, index,
       itemStarted: Date.now(), answer: {}, limit: 10, played: false,
-      item: { id: 'q' + index, task: 'repeat', prompt: 'Repeat this sentence.' },
+      item: { id: 'q' + index, task: 'repeat', prompt: 'The library opens at nine.', passage: 'The library opens at nine.' },
       audio: '/fixture.wav', deadline: 0, responseUntil: 0,
     })
     const clips = []
@@ -54,6 +54,8 @@ export async function checkSpeakingHandoff(browser, origin) {
     await page.goto(origin + '/#attempt/handoff')
     const finish = page.getByRole('button', { name: 'Finish recording' })
     await finish.waitFor()
+    await page.getByRole('heading', { name: 'Listen, then repeat what you hear.' }).waitFor()
+    assert.equal(await page.getByText('The library opens at nine.', { exact: true }).count(), 0)
     await page.waitForFunction(() => performance.now() - window.mediaLog.starts[0] > 650)
     await finish.click()
     // The second response expires by timer, then the third prompt starts.

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { WordCapture } from './WordCapture.tsx'
 import { catalog } from '../core/types.ts'
+import { liveSpeakingItem } from '../core/speech.ts'
 import { api, isLive, localFetch, localAudioUrl } from './api.ts'
 import { SessionAudio } from './SessionAudio.tsx'
 import type { LiveView, Session } from './api.ts'
@@ -21,7 +22,7 @@ export function Exam({
     [recording, setRecording] = useState(false),
     [saving, setSaving] = useState(false),
     [hide, setHide] = useState(false)
-  const q = s.item,
+  const q = liveSpeakingItem(s.item),
     localKey = 'fieldwork-draft-' + s.id + '-' + q.id
   const [text, setText] = useState(
     () => localStorage.getItem(localKey) ?? s.answer.text ?? '',

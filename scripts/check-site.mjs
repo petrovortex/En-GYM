@@ -10,7 +10,7 @@ const files = [
   'index.html',
   'guide.html',
   'site.css',
-  'assets/en-gym.svg',
+  'assets/en-gym.png',
   ...['speaking', 'practice', 'report', 'words'].map(
     (n) => 'assets/' + n + '.png',
   ),

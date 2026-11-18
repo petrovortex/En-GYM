@@ -54,7 +54,7 @@ if (process.argv.includes('--seed')) {
       assert.ok(ready, 'The screenshot server could not start.')
     } finally { output.close() }
     mkdirSync(assets, { recursive: true })
-    copyFileSync('public/en-gym.svg', join(assets, 'en-gym.svg'))
+    copyFileSync('public/en-gym.png', join(assets, 'en-gym.png'))
     browser = await chromium.launch({ executablePath: process.env.FIELDWORK_CHROME ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe' })
     const page = await browser.newPage({ viewport: { width: 1160, height: 850 }, deviceScaleFactor: 1.5 })
     await page.goto(origin)

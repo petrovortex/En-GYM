@@ -23,7 +23,7 @@ try {
   try {
     $runtime = Join-Path $work 'node-win'
     if (!(Test-Path -LiteralPath "$runtime/ready-24.22.2") -or !(Test-Path -LiteralPath "$runtime/npm.cmd") -or !(Test-Path -LiteralPath "$runtime/node_modules/npm/bin/npm-cli.js") -or !(Test-Path -LiteralPath "$runtime/node.exe")) {
-      Write-Host 'Downloading the development runtime for En-GYM...'
+      Write-Host 'Downloading the runtime for En-GYM...'
       Invoke-InBuildDirectory {
         param($stage)
         $zip = Join-Path $stage 'node.zip'
@@ -80,7 +80,7 @@ try {
       & "$runtime/node.exe" (Join-Path $PSScriptRoot 'install-phonon.mjs')
       if ($LASTEXITCODE) { throw 'The local voices need repair. Check your internet connection and open the launcher again.' }
     }
-    $sources = Get-ChildItem src,core -File -Recurse
+    $sources = Get-ChildItem src,core,public -File -Recurse
     $sources += Get-Item -LiteralPath 'index.html','package.json','tsconfig.json'
     $index = Get-Item -LiteralPath 'dist/index.html' -ErrorAction SilentlyContinue
     if ($install -or !$index -or ($sources | Where-Object LastWriteTimeUtc -gt $index.LastWriteTimeUtc)) {

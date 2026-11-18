@@ -3,7 +3,7 @@ setlocal
 rem Let Windows PowerShell load its own built-in modules when launched from another shell.
 set "PSModulePath="
 cd /d "%~dp0"
-title En-GYM development launcher
+title En-GYM
 where powershell.exe >nul 2>nul
 if errorlevel 1 (
   echo Windows PowerShell is missing. Restore Windows PowerShell, then open this launcher again.

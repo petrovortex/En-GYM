@@ -16,7 +16,8 @@ import { resolve, join, extname, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { LocalSessions, launchPage, launchScript } from './local-session.ts'
-import { promptUrl } from '../core/speech.ts'
+import { silentGrade, silentRecording } from './recording.ts'
+import { liveSpeakingItem, promptUrl } from '../core/speech.ts'
 import metadata from '../package.json' with { type: 'json' }
 import { bank, advance, begin, expire, RULES } from '../core/exam.ts'
 import { current, secondsLimit } from '../core/types.ts'
@@ -112,6 +113,7 @@ const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
   '.wav': 'audio/wav',
   '.ico': 'image/x-icon',
 }
@@ -165,14 +167,14 @@ function view(a: Live) {
     minutes: st.minutes,
     answer: a.answers[q.id] ?? {},
     responseUntil: a.responseUntil ?? 0,
-    item: {
+    item: liveSpeakingItem({
       ...q,
       keys: undefined,
       evidence: undefined,
       speech: undefined,
       passage:
         q.task === 'words' ? q.passage : q.speech ? undefined : q.passage,
-    },
+    }),
     audio: q.speech
       ? audioReady(q)
         ? promptUrl('/audio/' + audioKey(q) + '.wav', voicePack)
@@ -381,9 +383,10 @@ const server = createServer(async (req, res) => {
       writeFileSync(join(clips, key + '.tmp'), wave(samples, rate))
       renameSync(join(clips, key + '.tmp'), join(clips, key + '.wav'))
       a.answers[capture.item] = {
-        ...a.answers[capture.item],
+        elapsed: a.answers[capture.item]?.elapsed,
         clip: key,
         seconds: samples.length / (rate * 2),
+        ...(silentRecording(samples, rate) ? silentGrade : {}),
       }
       delete a.capture
       save(a)

@@ -5,6 +5,7 @@ import type { Task } from '../core/types.ts'
 import { clips, load, save } from './store.ts'
 import { complete } from './provider.ts'
 import { transcribe, wavInfo } from './speech.ts'
+import { silentGrade, silentRecording } from './recording.ts'
 function json(text: string) {
   return JSON.parse(
     text
@@ -29,11 +30,19 @@ export async function localTranscript(id: string, itemId: string) {
   const q = a.stages.flatMap((s) => s.items).find((i) => i.id === itemId)
   const ans = a.answers[itemId]
   if (!q || !ans?.clip) throw Error('Select a recorded response.')
-  if (ans.transcript && ans.timing) return a
   const path = join(clips, ans.clip + '.wav'),
     w = wavInfo(readFileSync(path))
+  if (silentRecording(w.pcm, w.rate)) {
+    Object.assign(ans, silentGrade)
+    delete ans.gradingState
+    delete ans.transcript
+    updateBands(a)
+    save(a)
+    return a
+  }
+  if (ans.transcript && ans.timing && !ans.note?.startsWith('Uncertain transcript')) return a
   const total = w.pcm.length / (2 * w.rate)
-  let silent = 0,
+  let quietSamples = 0,
     quietRun = 0,
     pauses = 0
   for (let p = 0; p < w.pcm.length; p += 640) {
@@ -44,13 +53,14 @@ export async function localTranscript(id: string, itemId: string) {
       count++
     }
     if (energy / Math.max(1, count) < 0.0001) {
-      silent += 0.02
-      quietRun += 0.02
+      quietSamples += count
+      quietRun += count / w.rate
     } else {
       if (quietRun >= 0.4) pauses++
       quietRun = 0
     }
   }
+  const silent = quietSamples / w.rate
   const timing =
     'Duration ' +
     total.toFixed(1) +
@@ -59,14 +69,15 @@ export async function localTranscript(id: string, itemId: string) {
     's; pauses over 0.4s: ' +
     pauses +
     '.'
-  const transcript = await transcribe(path),
+  const transcript = ans.transcript?.trim() || await transcribe(path),
     latest = load(id)
   Object.assign(latest.answers[itemId], { transcript, timing })
-  if (
-    !transcript ||
-    /^\s*[\[(].*[\])]\s*$/.test(transcript) ||
-    silent >= total * 0.95
-  )
+  const noWords = !transcript.trim() || /^\s*[\[(].*[\])]\s*$/.test(transcript)
+  if (noWords && silent >= total) {
+    Object.assign(latest.answers[itemId], silentGrade)
+    delete latest.answers[itemId].gradingState
+    updateBands(latest)
+  } else if (noWords || silent >= total * 0.95)
     latest.answers[itemId].note =
       'Uncertain transcript. Replay the recording and retry this item.'
   save(latest)
@@ -82,6 +93,7 @@ export async function review(id: string, itemId: string) {
   if (a.answers[itemId]?.clip) a = await localTranscript(id, itemId)
   const ans = (a.answers[itemId] ??= {}),
     timing = ans.timing ?? ''
+  if (ans.reviewed) return a
   if (ans.note?.startsWith('Uncertain transcript')) return a
   if (!ans.clip && !ans.text?.trim()) {
     ans.score = 0
