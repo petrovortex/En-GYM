@@ -36,8 +36,10 @@ function protect(value: string, decode = false) {
   const result = spawnSync(
     join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', ps],
-    { input: value, encoding: 'utf8', windowsHide: true, timeout: 10000 },
+    { input: value, encoding: 'utf8', windowsHide: true, timeout: 30000 },
   )
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT')
+    throw Error('Windows took too long to access the protected credential store. Try again.')
   if (result.status !== 0)
     throw Error('Windows could not access the protected credential store.')
   return result.stdout.trim()
