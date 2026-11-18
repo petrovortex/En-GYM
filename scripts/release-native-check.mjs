@@ -90,6 +90,7 @@ function run(exe, args, options = {}, expected = 0) {
   )
 }
 function install(exe) {
+  console.log('Starting the isolated installer.')
   run(
     exe,
     [
@@ -105,6 +106,7 @@ function install(exe) {
     ],
     { cwd: folder, env: installedEnv },
   )
+  console.log('The isolated installer finished.')
 }
 const fixtureSpeech = join(checkout, '.work', 'release', 'speech')
 const windowsPowerShell = join(

@@ -24,7 +24,9 @@ SetupIconFile={#LogoFile}
 UninstallDisplayIcon={app}\En-GYM.exe
 OutputDir={#OutputFolder}
 OutputBaseFilename=En-GYM-Setup
-CloseApplications=yes
+; The tray and update helper coordinate shutdown. Let file-in-use errors reach
+; recovery instead of asking Restart Manager to close other processes.
+CloseApplications=no
 RestartApplications=no
 SetupMutex=Local\En-GYM-Setup-732FA5F0
 Uninstallable=not FixtureInstall
