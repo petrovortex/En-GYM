@@ -39,6 +39,21 @@ const paths = {
 }
 const profile = join(workArea, 'user'),
   dbPath = join(profile, 'practice.sqlite')
+const speakingAttempt = {
+  id: 'release-speaking', mode: 'drill', focus: 'repeat', rules: 1,
+  seed: 1, started: 1000, ended: 3000, stage: 0, index: 0,
+  deadline: 0, itemStarted: 0, bands: {}, messages: [],
+  stages: [{ section: 'Speaking', name: 'Speaking', minutes: 0, items: [{
+    id: 'spoken', level: 2, title: 'Saved speaking response', task: 'repeat',
+    prompt: 'Listen and repeat.', speech: 'We study English at the library every day.',
+  }] }],
+  answers: { spoken: {
+    clip: '54b7dd5f-4c4e-4c20-b5a1-cdb1701552c1', seconds: 1, elapsed: 2,
+    transcript: 'We study English at the library every day.',
+  } },
+}
+const recordingPath = join(profile, 'recordings', speakingAttempt.answers.spoken.clip + '.wav')
+let savedRecording
 const installedEnv = {
   ...process.env,
   LOCALAPPDATA: local,
@@ -193,6 +208,19 @@ try {
       cwd: app,
       env: installedEnv,
     })
+    run(installedNode, ['--input-type=module', '-e', `
+      import {save, clips} from './server/store.ts'
+      import {wave} from './server/speech.ts'
+      import {writeFileSync} from 'node:fs'
+      import {join} from 'node:path'
+      const attempt = JSON.parse(process.argv[1])
+      save(attempt)
+      const pcm = Buffer.alloc(32000)
+      for (let i = 0; i < 16000; i++)
+        pcm.writeInt16LE(Math.round(Math.sin(i * 2 * Math.PI * 440 / 16000) * 4000), i * 2)
+      writeFileSync(join(clips, attempt.answers.spoken.clip + '.wav'), wave(pcm, 16000))
+    `, JSON.stringify(speakingAttempt)], { cwd: app, env: installedEnv })
+    savedRecording = await readFile(recordingPath)
     const db = new DatabaseSync(dbPath)
     db.exec(
       "CREATE TABLE release_probe(value TEXT); INSERT INTO release_probe VALUES('retained')",
@@ -263,16 +291,21 @@ try {
       install,
       health: (changed) => installedHealth(paths, changed),
     }
-    const preserved = () => {
+    const preserved = async () => {
       const check = new DatabaseSync(dbPath, { readOnly: true })
       try {
         assert.equal(
           check.prepare('SELECT value FROM release_probe').get().value,
           'retained',
         )
+        const saved = check.prepare('SELECT snapshot FROM attempts WHERE id=?').get(speakingAttempt.id)
+        assert.ok(saved, 'The saved Speaking attempt must survive the update.')
+        assert.deepEqual(JSON.parse(saved.snapshot), speakingAttempt)
       } finally {
         check.close()
       }
+      assert.deepEqual(await readFile(recordingPath), savedRecording,
+        'The saved Speaking recording must remain byte-for-byte intact.')
     }
     await writeFile(join(app, '.fail-health'), 'fixture')
     stage()
@@ -287,7 +320,7 @@ try {
       await readFile(join(paths.speech, config)),
       await readFile(join(work, 'speech', config)),
     )
-    preserved()
+    await preserved()
     await rm(join(app, '.fail-health'))
     stage()
     assert.equal(await applyPrepared(paths, options), 'installed')
@@ -300,8 +333,8 @@ try {
       await readFile(join(paths.speech, config)),
       await readFile(join(fixtureSpeech, config)),
     )
-    preserved()
-    run(installedNode, [join(project, 'packaging', 'check-installed.mjs')], {
+    await preserved()
+    run(installedNode, [join(checkout, 'packaging', 'check-installed.mjs')], {
       cwd: app,
       env: installedEnv,
     })
@@ -314,7 +347,7 @@ try {
   console.log(
     buildOnly
       ? 'Built two distinct Windows installers and verified their signed catalogs, speech diff and identical speech-only installer reattachment.'
-      : 'Two native installer builds passed update, rollback, speech, database, authenticated relaunch and speech-only publication checks.',
+      : 'Two native installer builds passed update, rollback, speech, database, saved Speaking response and recording, authenticated relaunch and speech-only publication checks.',
   )
 } finally {
   if (
