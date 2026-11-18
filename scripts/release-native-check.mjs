@@ -199,6 +199,7 @@ try {
   console.log('Building the first isolated Windows package.')
   const first = await issue('98.1.0', '1.0.0')
   if (!buildOnly) {
+    console.log('Installing the first package and checking its database.')
     install(join(first.out, 'En-GYM-Setup.exe'))
     const receipts = {}
     for (const id of ['phonon', 'whisper'])
@@ -208,6 +209,7 @@ try {
       cwd: app,
       env: installedEnv,
     })
+    console.log('Saving a Speaking response and recording in the first installation.')
     run(installedNode, ['--input-type=module', '-e', `
       import {save, clips} from './server/store.ts'
       import {wave} from './server/speech.ts'
@@ -308,8 +310,10 @@ try {
         'The saved Speaking recording must remain byte-for-byte intact.')
     }
     await writeFile(join(app, '.fail-health'), 'fixture')
+    console.log('Preparing the update for the forced-failure check.')
     stage()
     // Confirm the health check actually exercised the modified SQLite database.
+    console.log('Applying the update and verifying rollback after a failed health check.')
     await assert.rejects(applyPrepared(paths, options), (err) => err.code === 80)
     assert.equal(await installedApp(paths), '98.1.0')
     assert.equal(
@@ -322,6 +326,7 @@ try {
     )
     await preserved()
     await rm(join(app, '.fail-health'))
+    console.log('Preparing and applying the successful update.')
     stage()
     assert.equal(await applyPrepared(paths, options), 'installed')
     assert.equal(await installedApp(paths), '98.2.0')
@@ -334,11 +339,13 @@ try {
       await readFile(join(fixtureSpeech, config)),
     )
     await preserved()
+    console.log('Checking upgraded speech and two authenticated server restarts.')
     run(installedNode, [join(checkout, 'packaging', 'check-installed.mjs')], {
       cwd: app,
       env: installedEnv,
     })
   }
+  console.log('Checking speech-only publication with the existing installer.')
   const modelOnly = await issue('98.2.0', '1.1.0', false)
   assert.equal(
     modelOnly.catalog.components.app.files[0].sha256,
@@ -350,6 +357,7 @@ try {
       : 'Two native installer builds passed update, rollback, speech, database, saved Speaking response and recording, authenticated relaunch and speech-only publication checks.',
   )
 } finally {
+  console.log('Cleaning up the isolated release-check files.')
   if (
     dirname(folder) !== work ||
     !basename(folder).startsWith('release-check-') ||
